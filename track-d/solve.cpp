@@ -1,6 +1,6 @@
 // clang-format off
 // Forward Dijkstra. SWAR parse, 512-node BFS blobs, Dial queue, paged distances.
-// clang-format stays off, so these packed lines are the formatted source.
+
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -15,41 +15,298 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
-namespace { using u8 = uint8_t; using u32 = uint32_t; using u64 = uint64_t; constexpr auto REL = std::memory_order_relaxed; constexpr int kBlob = 512; constexpr u32 kDial = 8192; constexpr u64 kInf = ~0ull; [[noreturn]] void die(const char *m) { fprintf(stderr, "track-d: %s\n", m); exit(1); } int threads() { if (const char *e = std::getenv("SD_THREADS")) {
-int n = std::atoi(e); if (n >= 1 && n <= 64) return n; } unsigned h = std::thread::hardware_concurrency(); if (!h) return 1; return h > 12 ? 12 : (int)h; } template <class T> T *mapn(size_t n) { if (!n) n = 1; void *p = mmap(nullptr, n * sizeof(T), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); if (p == MAP_FAILED) die("mmap"); return (T *)p; }
-void unmap(void *p, size_t n, size_t z) { if (p) munmap(p, (n ? n : 1) * z); } template <class F> void run(int T, F fn) { std::vector<std::thread> pool; pool.reserve(T); for (int t = 0; t < T; t++) pool.emplace_back(fn, t); for (auto &th : pool) th.join(); } constexpr u32 kVm = (1u << 21) - 1, kWs = 21, kSent = 2047; struct Big { u32 *k = nullptr, *v = nullptr, mask = 0, cap = 0;
-void clear() { if (k) { unmap(k, cap, 4); unmap(v, cap, 4); k = v = nullptr; cap = 0; } } void build(const std::vector<std::pair<u32, u32>> &items) { clear(); u32 c = 8; while (c < items.size() * 2u + 8u) c <<= 1; cap = c; mask = c - 1; k = mapn<u32>(c); v = mapn<u32>(c); memset(k, 0xFF, c * 4ull);
-for (auto [p, w] : items) { u32 h = (p * 0x9E3779B1u) & mask; while (k[h] != ~0u) h = (h + 1) & mask; k[h] = p; v[h] = w; } } u32 get(u32 i) const { u32 h = (i * 0x9E3779B1u) & mask; while (k[h] != i) h = (h + 1) & mask; return v[h]; } }; struct Graph { u32 n = 0, m = 0; u32 *ofs = nullptr, *es = nullptr, *inb = nullptr; Big big; bool has_in(u32 v) const { return (inb[v >> 5] >> (v & 31)) & 1u; }
-u32 weight(u32 i, u32 c) const { u32 w = c >> kWs; return w == kSent ? big.get(i) : w; } }; struct Store { u64 **tab = nullptr; u64 *slab = nullptr; u64 **spare = nullptr; u32 *live = nullptr; int nspare = 0, nlive = 0, pool = 0; void init(u32 chunks) { pool = (int)chunks; tab = mapn<u64 *>(chunks); slab = mapn<u64>((size_t)chunks * kBlob); spare = mapn<u64 *>(chunks);
-live = mapn<u32>(chunks); for (int i = 0; i < pool; i++) spare[i] = slab + (size_t)i * kBlob; nspare = pool; } void reset() { for (int i = 0; i < nlive; i++) { spare[nspare++] = tab[live[i]]; tab[live[i]] = nullptr; } nlive = 0; } u64 &at(u32 v) { u32 c = v >> 9; u64 *&p = tab[c]; if (!p) { if (!nspare) die("pages"); p = spare[--nspare]; memset(p, 0xFF, kBlob * sizeof(u64)); live[nlive++] = c; }
-return p[v & 511]; } }; struct Dial { std::vector<u32> b[kDial]; std::vector<int> touched; std::vector<u64> far_d; std::vector<u32> far_v; u64 cur = 0; void clear() { for (int i : touched) b[i].clear(); touched.clear(); far_d.clear(); far_v.clear(); cur = 0; } void push(u64 d, u32 v) { if (d - cur >= kDial) { far_d.push_back(d); far_v.push_back(v); return; }
-u32 i = (u32)d & (kDial - 1); if (b[i].empty()) touched.push_back((int)i); b[i].push_back(v); } bool take_far(u64 &d, u32 &v) { if (far_d.empty()) return false; size_t best = 0; for (size_t i = 1; i < far_d.size(); i++) if (far_d[i] < far_d[best]) best = i; d = far_d[best]; v = far_v[best]; far_d[best] = far_d.back(); far_v[best] = far_v.back(); far_d.pop_back(); far_v.pop_back(); return true; }
-}; int64_t dijkstra(const Graph &g, Store &st, Dial &h, u32 s, u32 t) { if (s == t) return 0; if (g.ofs[s] == g.ofs[s + 1]) return -1; if (!g.has_in(t)) return -1; st.reset(); h.clear(); st.at(s) = 0; h.push(0, s); const u32 *ofs = g.ofs; const u32 *es = g.es; auto relax = [&](u32 u) { for (u32 i = ofs[u]; i < ofs[u + 1]; i++) {
-u32 c = es[i]; u32 v = c & kVm; u64 nd = h.cur + g.weight(i, c); u64 &dv = st.at(v); if (nd < dv) { dv = nd; h.push(nd, v); } } }; while (true) { u32 bi = (u32)h.cur & (kDial - 1); if (h.b[bi].empty()) { u32 step = 1; while (step < kDial && h.b[(h.cur + step) & (kDial - 1)].empty()) ++step; if (step < kDial) { h.cur += step; continue; }
-u64 fd; u32 fv; if (!h.take_far(fd, fv)) return -1; if (st.at(fv) != fd) continue; h.cur = fd; if (fv == t) return (int64_t)h.cur; relax(fv); continue; } u32 u = h.b[bi].back(); h.b[bi].pop_back(); if (st.at(u) != h.cur) continue; if (u == t) return (int64_t)h.cur; relax(u); } } u32 dig8(u64 v) { v = (v & 0x0F0F0F0F0F0F0F0Full) * 2561 >> 8; v = (v & 0x00FF00FF00FF00FFull) * 6553601 >> 16;
-v = (v & 0x0000FFFF0000FFFFull) * 42949672960001ull >> 32; return (u32)v; } int lead(u64 v) { u64 hi = (v & 0xF0F0F0F0F0F0F0F0ull) ^ 0x3030303030303030ull; u64 lo = ((v & 0x0F0F0F0F0F0F0F0Full) + 0x0606060606060606ull) & 0xF0F0F0F0F0F0F0F0ull; u64 bad = hi | lo; if (!bad) return 8; return __builtin_ctzll(bad) >> 3; } int g_fd = -1; off_t g_edge = 0, g_end = 0; const char *g_map = nullptr;
-struct Scan { const char *p, *end; Scan(off_t b, off_t e) : p(g_map + b), end(g_map + e) {} bool num(u32 &o) { if (p >= end || (unsigned char)*p < '0') return false; size_t left = (size_t)(end - p); if (left >= 8) { u64 v; memcpy(&v, p, 8); int k = lead(v); if (k >= 8) { o = dig8(v); p += 8; while (p < end && (unsigned char)*p >= '0' && *p <= '9') o = o * 10u + *p++ - '0'; } else {
-o = 0; for (int t = 0; t < k; t++) { o = o * 10u + (u32)((v & 255) - '0'); v >>= 8; } p += k; } } else { o = 0; while (p < end && (unsigned char)*p >= '0' && *p <= '9') o = o * 10u + *p++ - '0'; } if (p < end && *p) ++p; return true; } }; template <class F> void parse_range(off_t b, off_t e, F fn) { if (b >= e) return; Scan sc(b, e); if (b != g_edge) {
-while (sc.p < sc.end && *sc.p != '\n') ++sc.p; if (sc.p < sc.end) ++sc.p; } u32 u, v, w; while (sc.num(u) && sc.num(v) && sc.num(w)) if (u != v) fn(u, v, w); } template <class F> void parse_all(int T, const std::vector<off_t> &cut, F fn) { run(T, [&](int t) { parse_range(cut[(size_t)t], cut[(size_t)t + 1], fn); }); } void blobs(u32 n, u32 *ofs, u32 *es, u32 *id, int T) {
-auto *claimed = mapn<std::atomic<u8>>(n); memset(claimed, 0, n); std::vector<std::vector<u32>> chain((size_t)T); run(T, [&](int t) { auto &order = chain[(size_t)t]; order.reserve((n / (u32)T) + kBlob); std::vector<u32> seeds; u32 lo = (u32)((u64)n * t / T); u32 hi = (u32)((u64)n * (t + 1) / T); u32 scan = lo; auto claim = [&](u32 v) {
-u8 no = 0; return claimed[v].compare_exchange_strong(no, 1, REL); }; for (;;) { u32 seed = n; while (!seeds.empty() && seed == n) { u32 s = seeds.back(); seeds.pop_back(); if (claim(s)) seed = s; } while (seed == n && scan < hi) { u32 s = scan++; if (ofs[s] != ofs[s + 1] && claim(s)) seed = s; } if (seed == n) break; size_t base = order.size(); size_t i = base; order.push_back(seed);
-for (; i < order.size() && order.size() - base < (size_t)kBlob; ++i) { u32 u = order[i]; for (u32 e = ofs[u]; e < ofs[u + 1] && order.size() - base < (size_t)kBlob; ++e) { u32 hv = es[e] & kVm; if (claim(hv)) order.push_back(hv); } } for (; i < order.size(); ++i) { u32 u = order[i]; for (u32 e = ofs[u]; e < ofs[u + 1]; ++e) { u32 hv = es[e] & kVm; if (!claimed[hv].load(REL)) seeds.push_back(hv); }
-} } }); u32 k = 0; for (auto &order : chain) for (u32 u : order) id[u] = k++; for (u32 u = 0; u < n; u++) if (!claimed[u].load(REL)) id[u] = k++; unmap(claimed, n, 1); if (k != n) die("order"); } void load(const char *path, Graph &g, u32 *&id) { g_fd = ::open(path, O_RDONLY); if (g_fd < 0) die("open graph"); struct stat st; if (fstat(g_fd, &st)) die("fstat");
-void *mp = mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, g_fd, 0); if (mp == MAP_FAILED) die("mmap file"); g_map = (const char *)mp; char hdr[64]{}; if (::pread(g_fd, hdr, 63, 0) < 2) die("header"); char *hp = hdr; auto hnum = [&] { u32 x = 0; while (*hp >= '0') x = x * 10u + (u32)(*hp++ - '0'); if (*hp) ++hp; return x;
-}; g.n = hnum(); hnum(); g_edge = 0; while (hdr[g_edge] && hdr[g_edge] != '\n') ++g_edge; ++g_edge; g_end = st.st_size; int T = threads(); if (g_end - g_edge < (1 << 20)) T = 1; std::vector<off_t> cut((size_t)T + 1); cut[0] = g_edge; cut[(size_t)T] = g_end; off_t span = g_end - g_edge; for (int t = 1; t < T; t++) {
-off_t x = g_edge + span * t / T; char b[96]; ssize_t r = ::pread(g_fd, b, 95, x); int k = 0; while (k < r && b[k] != '\n') ++k; cut[(size_t)t] = x + (k < r ? k + 1 : 0); if (cut[(size_t)t] < cut[(size_t)t - 1]) cut[(size_t)t] = cut[(size_t)t - 1]; } u32 n = g.n; g.ofs = mapn<u32>(n + 1); memset(g.ofs, 0, (n + 1ull) * 4); auto *deg = (std::atomic<u32> *)g.ofs;
-parse_all(T, cut, [&](u32 u, u32, u32) { deg[u + 1].fetch_add(1, REL); }); for (u32 i = 1; i <= n; i++) g.ofs[i] += g.ofs[i - 1]; g.m = g.ofs[n]; if (n >= (1u << 21)) die("n"); g.es = mapn<u32>(g.m ? g.m : 1); auto *cur = (std::atomic<u32> *)mapn<u32>(n); for (u32 i = 0; i < n; i++) cur[i].store(g.ofs[i], REL); std::vector<std::vector<std::pair<u32, u32>>> esc((size_t)T); run(T, [&](int t) {
-parse_range(cut[(size_t)t], cut[(size_t)t + 1], [&](u32 u, u32 v, u32 w) { u32 p = cur[u].fetch_add(1, REL); if (w >= kSent) { g.es[p] = v | (kSent << kWs); esc[(size_t)t].emplace_back(p, w); } else g.es[p] = v | (w << kWs); }); }); unmap(cur, n, 4); munmap((void *)g_map, (size_t)g_end); close(g_fd);
-std::vector<std::pair<u32, u32>> all; for (auto &e : esc) all.insert(all.end(), e.begin(), e.end()); g.big.build(all); id = mapn<u32>(n); blobs(n, g.ofs, g.es, id, threads()); u32 *nofs = mapn<u32>(n + 1); memset(nofs, 0, (n + 1ull) * 4); int Tn = threads(); run(Tn, [&](int t) { u32 lo = (u32)((u64)n * t / Tn); u32 hi = (u32)((u64)n * (t + 1) / Tn);
-for (u32 u = lo; u < hi; u++) nofs[id[u] + 1] = g.ofs[u + 1] - g.ofs[u]; }); for (u32 i = 1; i <= n; i++) nofs[i] += nofs[i - 1]; u32 words = (n + 31) / 32 + 1; g.inb = mapn<u32>(words); memset(g.inb, 0, words * 4ull); auto *ib = (std::atomic<u32> *)g.inb; u32 *nes = mapn<u32>(g.m ? g.m : 1); std::vector<std::vector<std::pair<u32, u32>>> nesc((size_t)Tn); run(Tn, [&](int t) {
-auto &mine = nesc[(size_t)t]; u32 lo = (u32)((u64)n * t / Tn); u32 hi = (u32)((u64)n * (t + 1) / Tn); for (u32 u = lo; u < hi; u++) { u32 j = nofs[id[u]]; for (u32 e = g.ofs[u]; e < g.ofs[u + 1]; e++, j++) { u32 c = g.es[e]; u32 v = id[c & kVm]; u32 w = c >> kWs; if (w == kSent) { w = g.big.get(e); mine.emplace_back(j, w); }
-nes[j] = v | ((w >= kSent ? kSent : w) << kWs); ib[v >> 5].fetch_or(1u << (v & 31), REL); } } }); unmap(g.es, g.m ? g.m : 1, 4); unmap(g.ofs, n + 1, 4); g.ofs = nofs; g.es = nes; all.clear(); for (auto &e : nesc) all.insert(all.end(), e.begin(), e.end()); g.big.build(all); } void append_i64(char *&o, int64_t x) { if (x < 0) { *o++ = '-'; x = -x; }
-char tmp[24]; int n = 0; u64 u = (u64)x; do tmp[n++] = (char)('0' + u % 10); while (u /= 10); while (n--) *o++ = tmp[n]; *o++ = '\n'; } const char *env_or(const char *k, const char *d) { const char *v = std::getenv(k); return v && *v ? v : d; }
+
+namespace {
+using u8 = uint8_t; using u32 = uint32_t; using u64 = uint64_t; constexpr auto REL = std::memory_order_relaxed;
+constexpr int kBlob = 512; constexpr u32 kDial = 8192; constexpr u64 kInf = ~0ull;
+
+[[noreturn]] void die(const char *m) {
+  fprintf(stderr, "track-d: %s\n", m); exit(1);
+}
+
+int threads() {
+  if (const char *e = std::getenv("SD_THREADS")) {
+    int n = std::atoi(e); if (n >= 1 && n <= 64) return n;
+  }
+  unsigned h = std::thread::hardware_concurrency(); if (!h) return 1; return h > 12 ? 12 : (int)h;
+}
+
+template <class T> T *mapn(size_t n) {
+  if (!n) n = 1; void *p = mmap(nullptr, n * sizeof(T), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (p == MAP_FAILED) die("mmap"); return (T *)p;
+}
+
+void unmap(void *p, size_t n, size_t z) {
+  if (p) munmap(p, (n ? n : 1) * z);
+}
+
+template <class F> void run(int T, F fn) {
+  std::vector<std::thread> pool; pool.reserve(T);
+  for (int t = 0; t < T; t++) pool.emplace_back(fn, t); for (auto &th : pool) th.join();
+}
+
+constexpr u32 kVm = (1u << 21) - 1, kWs = 21, kSent = 2047;
+struct Big {
+  u32 *k = nullptr, *v = nullptr, mask = 0, cap = 0;
+  void clear() { if (k) { unmap(k, cap, 4); unmap(v, cap, 4); k = v = nullptr; cap = 0; } }
+  void build(const std::vector<std::pair<u32, u32>> &items) {
+    clear(); u32 c = 8; while (c < items.size() * 2u + 8u) c <<= 1; cap = c; mask = c - 1;
+    k = mapn<u32>(c); v = mapn<u32>(c); memset(k, 0xFF, c * 4ull);
+    for (auto [p, w] : items) { u32 h = (p * 0x9E3779B1u) & mask; while (k[h] != ~0u) h = (h + 1) & mask; k[h] = p; v[h] = w; }
+  }
+  u32 get(u32 i) const { u32 h = (i * 0x9E3779B1u) & mask; while (k[h] != i) h = (h + 1) & mask; return v[h]; }
+};
+struct Graph {
+  u32 n = 0, m = 0; u32 *ofs = nullptr, *es = nullptr, *inb = nullptr; Big big;
+  bool has_in(u32 v) const { return (inb[v >> 5] >> (v & 31)) & 1u; }
+  u32 weight(u32 i, u32 c) const { u32 w = c >> kWs; return w == kSent ? big.get(i) : w; }
+};
+
+struct Store {
+  u64 **tab = nullptr; u64 *slab = nullptr; u64 **spare = nullptr; u32 *live = nullptr;
+  int nspare = 0, nlive = 0, pool = 0;
+  void init(u32 chunks) {
+    pool = (int)chunks; tab = mapn<u64 *>(chunks); slab = mapn<u64>((size_t)chunks * kBlob); spare = mapn<u64 *>(chunks);
+    live = mapn<u32>(chunks); for (int i = 0; i < pool; i++) spare[i] = slab + (size_t)i * kBlob; nspare = pool;
+  }
+  void reset() {
+    for (int i = 0; i < nlive; i++) {
+      spare[nspare++] = tab[live[i]]; tab[live[i]] = nullptr;
+    }
+    nlive = 0;
+  }
+  u64 &at(u32 v) {
+    u32 c = v >> 9; u64 *&p = tab[c];
+    if (!p) {
+      if (!nspare) die("pages"); p = spare[--nspare]; memset(p, 0xFF, kBlob * sizeof(u64)); live[nlive++] = c;
+    }
+    return p[v & 511];
+  }
+};
+
+struct Dial {
+  std::vector<u32> b[kDial]; std::vector<int> touched; std::vector<u64> far_d; std::vector<u32> far_v; u64 cur = 0;
+  void clear() {
+    for (int i : touched) b[i].clear(); touched.clear(); far_d.clear(); far_v.clear(); cur = 0;
+  }
+  void push(u64 d, u32 v) {
+    if (d - cur >= kDial) {
+      far_d.push_back(d); far_v.push_back(v); return;
+    }
+    u32 i = (u32)d & (kDial - 1); if (b[i].empty()) touched.push_back((int)i); b[i].push_back(v);
+  }
+  bool take_far(u64 &d, u32 &v) {
+    if (far_d.empty()) return false; size_t best = 0;
+    for (size_t i = 1; i < far_d.size(); i++) if (far_d[i] < far_d[best]) best = i; d = far_d[best]; v = far_v[best];
+    far_d[best] = far_d.back(); far_v[best] = far_v.back(); far_d.pop_back(); far_v.pop_back(); return true;
+  }
+};
+
+int64_t dijkstra(const Graph &g, Store &st, Dial &h, u32 s, u32 t) {
+  if (s == t) return 0; if (g.ofs[s] == g.ofs[s + 1]) return -1; if (!g.has_in(t)) return -1; st.reset();
+  h.clear(); st.at(s) = 0; h.push(0, s); const u32 *ofs = g.ofs; const u32 *es = g.es;
+  auto relax = [&](u32 u) {
+    for (u32 i = ofs[u]; i < ofs[u + 1]; i++) {
+      u32 c = es[i]; u32 v = c & kVm; u64 nd = h.cur + g.weight(i, c); u64 &dv = st.at(v);
+      if (nd < dv) { dv = nd; h.push(nd, v); }
+    }
+  };
+  while (true) {
+    u32 bi = (u32)h.cur & (kDial - 1);
+    if (h.b[bi].empty()) {
+      u32 step = 1; while (step < kDial && h.b[(h.cur + step) & (kDial - 1)].empty()) ++step;
+      if (step < kDial) {
+        h.cur += step; continue;
+      }
+      u64 fd; u32 fv; if (!h.take_far(fd, fv)) return -1; if (st.at(fv) != fd) continue;
+      h.cur = fd; if (fv == t) return (int64_t)h.cur; relax(fv); continue;
+    }
+    u32 u = h.b[bi].back(); h.b[bi].pop_back(); if (st.at(u) != h.cur) continue; if (u == t) return (int64_t)h.cur; relax(u);
+  }
+}
+
+u32 dig8(u64 v) {
+  v = (v & 0x0F0F0F0F0F0F0F0Full) * 2561 >> 8; v = (v & 0x00FF00FF00FF00FFull) * 6553601 >> 16;
+  v = (v & 0x0000FFFF0000FFFFull) * 42949672960001ull >> 32; return (u32)v;
+}
+
+int lead(u64 v) {
+  u64 hi = (v & 0xF0F0F0F0F0F0F0F0ull) ^ 0x3030303030303030ull;
+  u64 lo = ((v & 0x0F0F0F0F0F0F0F0Full) + 0x0606060606060606ull) & 0xF0F0F0F0F0F0F0F0ull; u64 bad = hi | lo;
+  if (!bad) return 8; return __builtin_ctzll(bad) >> 3;
+}
+
+int g_fd = -1; off_t g_edge = 0, g_end = 0; const char *g_map = nullptr;
+
+struct Scan {
+  const char *p, *end;
+  Scan(off_t b, off_t e) : p(g_map + b), end(g_map + e) {}
+  bool num(u32 &o) {
+    if (p >= end || (unsigned char)*p < '0') return false;
+    size_t left = (size_t)(end - p);
+    if (left >= 8) {
+      u64 v; memcpy(&v, p, 8); int k = lead(v);
+      if (k >= 8) {
+        o = dig8(v); p += 8; while (p < end && (unsigned char)*p >= '0' && *p <= '9') o = o * 10u + *p++ - '0';
+      } else {
+        o = 0; for (int t = 0; t < k; t++) { o = o * 10u + (u32)((v & 255) - '0'); v >>= 8; } p += k;
+      }
+    } else {
+      o = 0; while (p < end && (unsigned char)*p >= '0' && *p <= '9') o = o * 10u + *p++ - '0';
+    }
+    if (p < end && *p) ++p; return true;
+  }
+};
+
+template <class F> void parse_range(off_t b, off_t e, F fn) {
+  if (b >= e) return; Scan sc(b, e);
+  if (b != g_edge) {
+    while (sc.p < sc.end && *sc.p != '\n') ++sc.p; if (sc.p < sc.end) ++sc.p;
+  }
+  u32 u, v, w; while (sc.num(u) && sc.num(v) && sc.num(w)) if (u != v) fn(u, v, w);
+}
+
+template <class F> void parse_all(int T, const std::vector<off_t> &cut, F fn) {
+  run(T, [&](int t) { parse_range(cut[(size_t)t], cut[(size_t)t + 1], fn); });
+}
+
+void blobs(u32 n, u32 *ofs, u32 *es, u32 *id, int T) {
+  auto *claimed = mapn<std::atomic<u8>>(n); memset(claimed, 0, n); std::vector<std::vector<u32>> chain((size_t)T);
+  run(T, [&](int t) {
+    auto &order = chain[(size_t)t]; order.reserve((n / (u32)T) + kBlob);
+    std::vector<u32> seeds; u32 lo = (u32)((u64)n * t / T); u32 hi = (u32)((u64)n * (t + 1) / T); u32 scan = lo;
+    auto claim = [&](u32 v) {
+      u8 no = 0; return claimed[v].compare_exchange_strong(no, 1, REL);
+    };
+    for (;;) {
+      u32 seed = n;
+      while (!seeds.empty() && seed == n) {
+        u32 s = seeds.back(); seeds.pop_back(); if (claim(s)) seed = s;
+      }
+      while (seed == n && scan < hi) {
+        u32 s = scan++; if (ofs[s] != ofs[s + 1] && claim(s)) seed = s;
+      }
+      if (seed == n) break; size_t base = order.size(); size_t i = base; order.push_back(seed);
+      for (; i < order.size() && order.size() - base < (size_t)kBlob; ++i) {
+        u32 u = order[i]; for (u32 e = ofs[u]; e < ofs[u + 1] && order.size() - base < (size_t)kBlob; ++e) {
+          u32 hv = es[e] & kVm; if (claim(hv)) order.push_back(hv);
+        }
+      }
+      for (; i < order.size(); ++i) {
+        u32 u = order[i]; for (u32 e = ofs[u]; e < ofs[u + 1]; ++e) { u32 hv = es[e] & kVm; if (!claimed[hv].load(REL)) seeds.push_back(hv); }
+      }
+    }
+  }); u32 k = 0; for (auto &order : chain) for (u32 u : order) id[u] = k++;
+  for (u32 u = 0; u < n; u++) if (!claimed[u].load(REL)) id[u] = k++; unmap(claimed, n, 1); if (k != n) die("order");
+}
+
+void load(const char *path, Graph &g, u32 *&id) {
+  g_fd = ::open(path, O_RDONLY); if (g_fd < 0) die("open graph"); struct stat st; if (fstat(g_fd, &st)) die("fstat");
+  void *mp = mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, g_fd, 0); if (mp == MAP_FAILED) die("mmap file");
+  g_map = (const char *)mp;
+  char hdr[64]{};
+  if (::pread(g_fd, hdr, 63, 0) < 2) die("header"); char *hp = hdr;
+  auto hnum = [&] {
+    u32 x = 0; while (*hp >= '0') x = x * 10u + (u32)(*hp++ - '0'); if (*hp) ++hp; return x;
+  }; g.n = hnum(); hnum(); g_edge = 0; while (hdr[g_edge] && hdr[g_edge] != '\n') ++g_edge; ++g_edge; g_end = st.st_size;
+
+  int T = threads(); if (g_end - g_edge < (1 << 20)) T = 1; std::vector<off_t> cut((size_t)T + 1); cut[0] = g_edge;
+  cut[(size_t)T] = g_end; off_t span = g_end - g_edge;
+  for (int t = 1; t < T; t++) {
+    off_t x = g_edge + span * t / T; char b[96]; ssize_t r = ::pread(g_fd, b, 95, x); int k = 0;
+    while (k < r && b[k] != '\n') ++k; cut[(size_t)t] = x + (k < r ? k + 1 : 0);
+    if (cut[(size_t)t] < cut[(size_t)t - 1]) cut[(size_t)t] = cut[(size_t)t - 1];
+  }
+
+  u32 n = g.n; g.ofs = mapn<u32>(n + 1); memset(g.ofs, 0, (n + 1ull) * 4); auto *deg = (std::atomic<u32> *)g.ofs;
+  parse_all(T, cut, [&](u32 u, u32, u32) { deg[u + 1].fetch_add(1, REL); });
+  for (u32 i = 1; i <= n; i++) g.ofs[i] += g.ofs[i - 1]; g.m = g.ofs[n];
+  if (n >= (1u << 21)) die("n"); g.es = mapn<u32>(g.m ? g.m : 1);
+  auto *cur = (std::atomic<u32> *)mapn<u32>(n); for (u32 i = 0; i < n; i++) cur[i].store(g.ofs[i], REL);
+  std::vector<std::vector<std::pair<u32, u32>>> esc((size_t)T);
+  run(T, [&](int t) {
+    parse_range(cut[(size_t)t], cut[(size_t)t + 1], [&](u32 u, u32 v, u32 w) {
+      u32 p = cur[u].fetch_add(1, REL);
+      if (w >= kSent) { g.es[p] = v | (kSent << kWs); esc[(size_t)t].emplace_back(p, w); }
+      else g.es[p] = v | (w << kWs);
+    });
+  }); unmap(cur, n, 4); munmap((void *)g_map, (size_t)g_end); close(g_fd);
+  std::vector<std::pair<u32, u32>> all; for (auto &e : esc) all.insert(all.end(), e.begin(), e.end()); g.big.build(all);
+  id = mapn<u32>(n); blobs(n, g.ofs, g.es, id, threads());
+
+  u32 *nofs = mapn<u32>(n + 1); memset(nofs, 0, (n + 1ull) * 4); int Tn = threads();
+  run(Tn, [&](int t) {
+    u32 lo = (u32)((u64)n * t / Tn); u32 hi = (u32)((u64)n * (t + 1) / Tn);
+    for (u32 u = lo; u < hi; u++) nofs[id[u] + 1] = g.ofs[u + 1] - g.ofs[u];
+  }); for (u32 i = 1; i <= n; i++) nofs[i] += nofs[i - 1];
+
+  u32 words = (n + 31) / 32 + 1; g.inb = mapn<u32>(words);
+  memset(g.inb, 0, words * 4ull); auto *ib = (std::atomic<u32> *)g.inb; u32 *nes = mapn<u32>(g.m ? g.m : 1);
+  std::vector<std::vector<std::pair<u32, u32>>> nesc((size_t)Tn);
+  run(Tn, [&](int t) {
+    auto &mine = nesc[(size_t)t];
+    u32 lo = (u32)((u64)n * t / Tn); u32 hi = (u32)((u64)n * (t + 1) / Tn);
+    for (u32 u = lo; u < hi; u++) {
+      u32 j = nofs[id[u]];
+      for (u32 e = g.ofs[u]; e < g.ofs[u + 1]; e++, j++) {
+        u32 c = g.es[e]; u32 v = id[c & kVm]; u32 w = c >> kWs;
+        if (w == kSent) { w = g.big.get(e); mine.emplace_back(j, w); }
+        nes[j] = v | ((w >= kSent ? kSent : w) << kWs); ib[v >> 5].fetch_or(1u << (v & 31), REL);
+      }
+    }
+  }); unmap(g.es, g.m ? g.m : 1, 4); unmap(g.ofs, n + 1, 4); g.ofs = nofs; g.es = nes;
+  all.clear(); for (auto &e : nesc) all.insert(all.end(), e.begin(), e.end()); g.big.build(all);
+}
+
+void append_i64(char *&o, int64_t x) {
+  if (x < 0) { *o++ = '-'; x = -x; }
+  char tmp[24]; int n = 0; u64 u = (u64)x; do tmp[n++] = (char)('0' + u % 10); while (u /= 10);
+  while (n--) *o++ = tmp[n]; *o++ = '\n';
+}
+
+const char *env_or(const char *k, const char *d) {
+  const char *v = std::getenv(k); return v && *v ? v : d;
+}
+
 } // namespace
-int main() { prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0); mallopt(M_MMAP_THRESHOLD, 64 * 1024); mallopt(M_TRIM_THRESHOLD, 64 * 1024); std::string dir = env_or("DATA", "/data"); std::string outp = std::string(env_or("OUT", "/out")) + "/distances.txt"; Graph g; u32 *id = nullptr; load((dir + "/graph.txt").c_str(), g, id);
-int qfd = ::open((dir + "/queries.txt").c_str(), O_RDONLY); if (qfd < 0) die("open queries"); struct stat qs; if (fstat(qfd, &qs)) die("fstat q"); char *qb = mapn<char>((size_t)qs.st_size + 1); size_t got = 0; while (got < (size_t)qs.st_size) { ssize_t r = ::read(qfd, qb + got, (size_t)qs.st_size - got); if (r <= 0) die("read q"); got += (size_t)r; }
-close(qfd); qb[got] = 0; std::vector<u32> sxs, txs; for (char *p = qb; *p;) { u32 s = 0, t = 0; while (*p >= '0') s = s * 10u + (u32)(*p++ - '0'); if (*p) ++p; while (*p >= '0') t = t * 10u + (u32)(*p++ - '0'); if (*p) ++p; sxs.push_back(id[s]); txs.push_back(id[t]); } unmap(qb, (size_t)qs.st_size + 1, 1); unmap(id, g.n, 4);
-int Q = (int)sxs.size(); std::vector<int> ord(Q); for (int i = 0; i < Q; i++) ord[i] = i; std::sort(ord.begin(), ord.end(), [&](int a, int b) { return sxs[a] < sxs[b]; }); int T = threads(); if (T > Q) T = Q; if (T < 1) T = 1; std::vector<int64_t> ans(Q); std::atomic<int> next{0}; u32 chunks = (g.n + kBlob - 1) / kBlob; run(T, [&](int) { Store st; st.init(chunks); Dial h; for (;;) {
-int k = next.fetch_add(1, REL); if (k >= Q) break; int i = ord[k]; ans[i] = dijkstra(g, st, h, sxs[i], txs[i]); } }); char *out = mapn<char>((size_t)Q * 24 + 8); char *op = out; for (int64_t d : ans) append_i64(op, d); int ofd = ::open(outp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); if (ofd < 0) die("open out"); size_t left = (size_t)(op - out); const char *wp = out; while (left) {
-ssize_t k = ::write(ofd, wp, left); if (k < 0) die("write"); wp += k; left -= (size_t)k; } close(ofd); return 0; }
+
+int main() {
+  prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0); mallopt(M_MMAP_THRESHOLD, 64 * 1024);
+  mallopt(M_TRIM_THRESHOLD, 64 * 1024); std::string dir = env_or("DATA", "/data");
+  std::string outp = std::string(env_or("OUT", "/out")) + "/distances.txt"; Graph g;
+  u32 *id = nullptr; load((dir + "/graph.txt").c_str(), g, id);
+
+  int qfd = ::open((dir + "/queries.txt").c_str(), O_RDONLY); if (qfd < 0) die("open queries");
+  struct stat qs; if (fstat(qfd, &qs)) die("fstat q"); char *qb = mapn<char>((size_t)qs.st_size + 1); size_t got = 0;
+  while (got < (size_t)qs.st_size) {
+    ssize_t r = ::read(qfd, qb + got, (size_t)qs.st_size - got); if (r <= 0) die("read q"); got += (size_t)r;
+  }
+  close(qfd); qb[got] = 0; std::vector<u32> sxs, txs;
+  for (char *p = qb; *p;) {
+    u32 s = 0, t = 0; while (*p >= '0') s = s * 10u + (u32)(*p++ - '0');
+    if (*p) ++p; while (*p >= '0') t = t * 10u + (u32)(*p++ - '0'); if (*p) ++p; sxs.push_back(id[s]); txs.push_back(id[t]);
+  }
+  unmap(qb, (size_t)qs.st_size + 1, 1); unmap(id, g.n, 4);
+
+  int Q = (int)sxs.size(); std::vector<int> ord(Q); for (int i = 0; i < Q; i++) ord[i] = i;
+  std::sort(ord.begin(), ord.end(), [&](int a, int b) { return sxs[a] < sxs[b]; });
+
+  int T = threads(); if (T > Q) T = Q; if (T < 1) T = 1; std::vector<int64_t> ans(Q);
+  std::atomic<int> next{0};
+  u32 chunks = (g.n + kBlob - 1) / kBlob;
+  run(T, [&](int) {
+    Store st; st.init(chunks); Dial h;
+    for (;;) {
+      int k = next.fetch_add(1, REL); if (k >= Q) break; int i = ord[k]; ans[i] = dijkstra(g, st, h, sxs[i], txs[i]);
+    }
+  });
+
+  char *out = mapn<char>((size_t)Q * 24 + 8); char *op = out;
+  for (int64_t d : ans) append_i64(op, d); int ofd = ::open(outp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (ofd < 0) die("open out"); size_t left = (size_t)(op - out); const char *wp = out;
+  while (left) {
+    ssize_t k = ::write(ofd, wp, left); if (k < 0) die("write"); wp += k; left -= (size_t)k;
+  }
+  close(ofd); return 0;
+}
 // clang-format on
