@@ -22,6 +22,8 @@ The number that must not regress is the board wall time. A later push has to bea
 
 Board rejected 59410ea. The local floor is 5f407db until the line cut below.
 
+VERIFIED-WIN: b951722 local T=59.4 RSS=18 src=10890
+
 VERIFIED-WIN: a8d69d8 local T=59.5 RSS=23 src=10831
 
 VERIFIED-WIN: 59410ea local T=58.4 RSS=17.5 src=12273
