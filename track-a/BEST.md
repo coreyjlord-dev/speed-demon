@@ -17,6 +17,7 @@ The number that must not regress is the board wall time. A later push has to bea
 | 10 | 2026-10-30 | board | 41.1 ms | | 74.27 | | 5f407db restored by the integrator after the points drop. Local reference remains 57.1 ms / 23.0 MB / 408 lines / 72.22 pts |
 | 11 | 2026-10-30 | local | 58.4 ms | 17.5 MB | | | 4-byte packed records, overflow list, malloc arenas capped at 2. Paired with 5f407db in the same session (61.1 ms / 22.7 MB). 12 threads 65.7 ms / 22.2 MB vs 5f407db 68.0 ms / 28.4 MB. Formatted lines 432. Est. points 72.98 |
 | 12 | 2026-10-30 | board | 42.967 ms | 30.9 MB | 73.79 | | 59410ea. 5f407db re-scored 41.140 ms / 31.0 MB / S=415 / 74.435. Pack reverted: RSS did not move, time got worse. Arena cap and the overflow side list stay out. Floor is 5f407db |
+| 13 | 2026-10-30 | local | 59.5 ms | 23 MB | | | Line cut on 5f407db. Paired in the same session: 59.5 vs 59.9 ms, RSS 22–23 vs 22. 12 threads 73.4 vs 73.6 ms. Formatted scc 287 vs 408. Same hashes. Est. +1.15 points from S at equal time |
 
 Board rejected 59410ea. The local VERIFIED-WIN below is not the floor.
 
