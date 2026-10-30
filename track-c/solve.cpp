@@ -1,15 +1,17 @@
-// Track C (Join): quote-aware CSV parse, array join, country-local names.
+// Track C. One pass over records.csv.
 //
-// Names come from a pool of about 100k values. Each worker interns into
-// a compact arena (a few MB) and compares hits against that arena, not
-// against a random offset in the CSV. Name ids go into a per-country
-// bucket and become a bitset only after the scan, one country at a time,
-// so the bitset stays in L1. A global intern then gives every worker the
-// same id for the same bytes, and the buckets are OR-ed. Amounts are cents.
-// Region ids use a one-byte table. Finished CSV pages are dropped.
+// A record is id, name, note, region, amount. Names and notes are short, and
+// quotes are escaped by doubling. memchr finds the next quote or comma, so
+// each byte is touched once. Names are interned raw ("" is one-to-one with an
+// escaped quote) in a shared table. A 16-bit tag rejects most probes. Ids are
+// dense. Each thread appends those ids into per-country lists, then one bitset
+// per country (it fits in L1) counts the distinct names. Lookups are queued
+// 16 records ahead so the tag line is already in cache.
+//
+// Transparent huge pages are off. The box otherwise rounds dense tables up to
+// 2 MB and the cgroup peak jumps.
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <climits>
 #include <cstdint>
@@ -18,19 +20,22 @@
 #include <cstring>
 #include <fcntl.h>
 #include <immintrin.h>
-#include <string>
+#include <malloc.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <thread>
-#include <time.h>
 #include <unistd.h>
-#include <utility>
 #include <vector>
 
 namespace {
 
-constexpr uint32_t kEmpty = 0xffffffffu;
 constexpr uint8_t kNoCountry = 0xff;
+constexpr uint32_t kSlots = 1u << 18;
+constexpr uint32_t kMask = kSlots - 1;
+constexpr uint32_t kMaxNames = 1u << 17;
+constexpr uint32_t kWords = kMaxNames >> 6;
+constexpr uint16_t kBusy = 1;
 
 [[noreturn]] void die(const char* msg) {
   fprintf(stderr, "track-c: %s\n", msg);
@@ -44,8 +49,14 @@ int worker_count() {
   }
   unsigned hc = std::thread::hardware_concurrency();
   if (hc == 0) return 1;
-  if (hc >= 8) return static_cast<int>(hc / 2);
+  if (hc > 12) return 12;
   return static_cast<int>(hc);
+}
+
+void tune_alloc() {
+  prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
+  mallopt(M_ARENA_MAX, 2);
+  mallopt(M_MMAP_THRESHOLD, 1 << 20);
 }
 
 struct Mapped {
@@ -53,8 +64,8 @@ struct Mapped {
   size_t len = 0;
   const char* data = nullptr;
 
-  explicit Mapped(const std::string& path) {
-    fd = ::open(path.c_str(), O_RDONLY);
+  explicit Mapped(const char* path) {
+    fd = ::open(path, O_RDONLY);
     if (fd < 0) die("open input");
     struct stat st {};
     if (fstat(fd, &st) != 0) die("fstat");
@@ -65,26 +76,17 @@ struct Mapped {
     data = static_cast<const char*>(p);
     madvise(const_cast<char*>(data), len, MADV_SEQUENTIAL);
   }
-
   ~Mapped() {
     if (data) munmap(const_cast<char*>(data), len);
     if (fd >= 0) close(fd);
   }
-
   Mapped(const Mapped&) = delete;
   Mapped& operator=(const Mapped&) = delete;
 };
 
-void drop_pages(const char* base, size_t from, size_t to) {
-  uintptr_t pa = (reinterpret_cast<uintptr_t>(base + from) + 4095u) & ~uintptr_t(4095);
-  uintptr_t pb = reinterpret_cast<uintptr_t>(base + to) & ~uintptr_t(4095);
-  if (pb > pa) madvise(reinterpret_cast<void*>(pa), pb - pa, MADV_DONTNEED);
-}
-
 bool is_bom(const char* p, const char* end) {
   return p + 3 <= end && static_cast<unsigned char>(p[0]) == 0xEF &&
-         static_cast<unsigned char>(p[1]) == 0xBB &&
-         static_cast<unsigned char>(p[2]) == 0xBF;
+         static_cast<unsigned char>(p[1]) == 0xBB && static_cast<unsigned char>(p[2]) == 0xBF;
 }
 
 struct Agg {
@@ -97,105 +99,9 @@ struct Agg {
   int64_t amax = INT64_MIN;
 };
 
-struct Slot {
-  uint32_t hash = 0;
-  uint32_t off = 0;
-  uint32_t len = 0;
-  uint32_t id = kEmpty;
-};
-
-struct Intern {
-  std::string arena;
-  std::vector<Slot> slots;
-  std::vector<uint32_t> span_off;
-  std::vector<uint32_t> span_len;
-  uint32_t mask = 0;
-  uint32_t used = 0;
-
-  explicit Intern(uint32_t cap = 1u << 18) {
-    slots.assign(cap, Slot{});
-    mask = cap - 1;
-    arena.reserve(1u << 20);
-    span_off.reserve(cap / 2);
-    span_len.reserve(cap / 2);
-  }
-
-  void rehash(uint32_t cap) {
-    std::vector<Slot> ns(cap);
-    uint32_t m = cap - 1;
-    for (const Slot& sl : slots) {
-      if (sl.id == kEmpty) continue;
-      uint32_t i = sl.hash & m;
-      while (ns[i].id != kEmpty) i = (i + 1) & m;
-      ns[i] = sl;
-    }
-    slots.swap(ns);
-    mask = m;
-  }
-
-  static uint32_t mix(const char* s, uint32_t n) {
-    uint64_t h = n;
-    uint32_t i = 0;
-    for (; i + 8 <= n; i += 8) {
-      uint64_t v;
-      std::memcpy(&v, s + i, 8);
-      h = _mm_crc32_u64(h, v);
-    }
-    if (i < n) {
-      uint64_t v = 0;
-      std::memcpy(&v, s + i, n - i);
-      h = _mm_crc32_u64(h, v);
-    }
-    return static_cast<uint32_t>(h);
-  }
-
-  uint32_t intern(const char* s, uint32_t n) {
-    uint32_t h = mix(s, n);
-    uint32_t i = h & mask;
-    for (;;) {
-      Slot& sl = slots[i];
-      if (sl.id == kEmpty) {
-        if ((used + 1) * 10 >= (mask + 1) * 7) {
-          rehash((mask + 1) * 2);
-          i = h & mask;
-          continue;
-        }
-        sl.hash = h;
-        sl.off = static_cast<uint32_t>(arena.size());
-        sl.len = n;
-        sl.id = used++;
-        arena.append(s, n);
-        span_off.push_back(sl.off);
-        span_len.push_back(n);
-        return sl.id;
-      }
-      if (sl.hash == h && sl.len == n &&
-          (n == 0 || std::memcmp(arena.data() + sl.off, s, n) == 0)) {
-        return sl.id;
-      }
-      i = (i + 1) & mask;
-    }
-  }
-
-  const char* get(uint32_t id, uint32_t& n) const {
-    n = span_len[id];
-    return arena.data() + span_off[id];
-  }
-};
-
-struct Local {
-  std::vector<Agg> ag;
-  Intern names;
-  std::vector<std::vector<uint32_t>> buckets;
-
-  explicit Local(size_t countries) : ag(countries), buckets(countries) {
-    for (auto& v : buckets) v.reserve(2048);
-  }
-};
-
 struct World {
   std::vector<uint8_t> region_country;
-  std::vector<std::array<char, 3>> codes;
+  std::vector<char> codes;
   int code_slot[26 * 26 * 26];
   uint32_t unmatched = 0;
 
@@ -204,10 +110,12 @@ struct World {
   uint32_t country_of(char a, char b, char c) {
     int s = (a - 'A') * 676 + (b - 'A') * 26 + (c - 'A');
     if (code_slot[s] >= 0) return static_cast<uint32_t>(code_slot[s]);
-    uint32_t id = static_cast<uint32_t>(codes.size());
+    uint32_t id = static_cast<uint32_t>(codes.size() / 3);
     if (id >= kNoCountry) die("too many countries");
     code_slot[s] = static_cast<int>(id);
-    codes.push_back({a, b, c});
+    codes.push_back(a);
+    codes.push_back(b);
+    codes.push_back(c);
     return id;
   }
 };
@@ -240,170 +148,200 @@ void load_regions(const Mapped& file, World& w) {
     if (id > max_id) max_id = id;
   }
   w.region_country.assign(static_cast<size_t>(max_id) + 1, kNoCountry);
-  for (const Row& r : rows) {
-    uint32_t cid = w.country_of(r.a, r.b, r.c);
-    w.region_country[r.id] = static_cast<uint8_t>(cid);
-  }
-  w.unmatched = static_cast<uint32_t>(w.codes.size());
+  for (const Row& r : rows) w.region_country[r.id] = static_cast<uint8_t>(w.country_of(r.a, r.b, r.c));
+  w.unmatched = static_cast<uint32_t>(w.codes.size() / 3);
 }
 
 inline uint32_t country_index(const World& w, uint32_t region) {
   if (region >= w.region_country.size()) return w.unmatched;
   uint8_t c = w.region_country[region];
-  if (c == kNoCountry) return w.unmatched;
-  return c;
+  return c == kNoCountry ? w.unmatched : c;
 }
 
-inline const char* find_quote(const char* p, const char* end) {
-  const uint64_t q = 0x2222222222222222ull;
-  while (p + 8 <= end) {
-    uint64_t v;
-    std::memcpy(&v, p, 8);
-    uint64_t x = v ^ q;
-    uint64_t m = (x - 0x0101010101010101ull) & ~x & 0x8080808080808080ull;
-    if (m) return p + static_cast<int>(__builtin_ctzll(m) >> 3);
-    p += 8;
+inline uint64_t parse_digits(const char* s, const char* e) {
+  uint64_t x = 0;
+  for (; s < e; s++) x = x * 10 + static_cast<uint64_t>(*s - '0');
+  return x;
+}
+
+struct Slot {
+  uint32_t len = 0;
+  uint32_t id = 0;
+  char name[24]{};
+  const char* extra = nullptr;
+};
+
+struct Names {
+  std::atomic<uint16_t> tags[kSlots];
+  Slot slots[kSlots];
+  std::atomic<uint32_t> next{0};
+
+  Names() {
+    for (auto& t : tags) t.store(0, std::memory_order_relaxed);
   }
-  while (p < end && *p != '"') p++;
-  return p;
-}
 
-const char* scan_quoted(const char* p, const char* end, const char** raw, uint32_t* unescaped_n,
-                        std::string& scratch) {
-  ++p;
-  const char* s = p;
-  const char* q = find_quote(p, end);
-  if (q < end && q + 1 < end && q[1] == '"') {
-    scratch.clear();
-    uint32_t n = 0;
-    while (p < end) {
-      if (*p == '"') {
-        if (p + 1 < end && p[1] == '"') {
-          scratch.push_back('"');
-          n++;
-          p += 2;
-        } else {
-          ++p;
-          break;
-        }
-      } else {
-        scratch.push_back(*p);
-        n++;
-        ++p;
-      }
+  static uint32_t mix(const char* s, uint32_t n) {
+    uint64_t h = n;
+    uint32_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+      uint64_t v;
+      std::memcpy(&v, s + i, 8);
+      h = _mm_crc32_u64(h, v);
     }
-    *raw = scratch.data();
-    *unescaped_n = n;
-    return p;
+    if (i < n) {
+      uint64_t v = 0;
+      std::memcpy(&v, s + i, n - i);
+      h = _mm_crc32_u64(h, v);
+    }
+    return static_cast<uint32_t>(h);
   }
-  *raw = s;
-  *unescaped_n = static_cast<uint32_t>(q - s);
-  return q < end ? q + 1 : q;
-}
 
-const char* parse_one(const char* p, const char* end, const World& w, Local& loc,
-                      std::string& scratch) {
+  bool eq(const Slot& sl, const char* s, uint32_t n) const {
+    if (sl.len != n) return false;
+    if (n <= 24) return n == 0 || std::memcmp(sl.name, s, n) == 0;
+    return std::memcmp(sl.name, s, 24) == 0 && std::memcmp(sl.extra, s + 24, n - 24) == 0;
+  }
+
+  uint32_t intern(const char* s, uint32_t n, uint32_t h) {
+    uint16_t tag = static_cast<uint16_t>(h >> 16);
+    if (tag < 2) tag = static_cast<uint16_t>(tag + 2);
+    uint32_t i = h & kMask;
+    for (;;) {
+      uint16_t t = tags[i].load(std::memory_order_acquire);
+      if (t == tag) {
+        if (eq(slots[i], s, n)) return slots[i].id;
+      } else if (t == 0) {
+        uint16_t exp = 0;
+        if (tags[i].compare_exchange_weak(exp, kBusy, std::memory_order_acq_rel)) {
+          uint32_t id = next.fetch_add(1, std::memory_order_relaxed);
+          if (id >= kMaxNames) die("name table full");
+          Slot& sl = slots[i];
+          sl.len = n;
+          sl.id = id;
+          uint32_t head = n < 24 ? n : 24;
+          if (head) std::memcpy(sl.name, s, head);
+          if (n > 24) {
+            char* buf = new char[n - 24];
+            std::memcpy(buf, s + 24, n - 24);
+            sl.extra = buf;
+          }
+          tags[i].store(tag, std::memory_order_release);
+          return id;
+        }
+        continue;
+      } else if (t == kBusy) {
+        _mm_pause();
+        continue;
+      }
+      i = (i + 1) & kMask;
+    }
+  }
+};
+
+struct Pend {
+  uint32_t country;
+  const char* s;
+  uint32_t n;
+  uint32_t h;
+};
+
+struct View {
+  const char* name = nullptr;
+  uint32_t name_raw = 0;
+  uint32_t name_un = 0;
+  uint32_t note_un = 0;
   uint64_t id = 0;
-  while (p < end && *p >= '0' && *p <= '9') {
-    id = id * 10u + static_cast<uint32_t>(*p - '0');
-    ++p;
-  }
-  ++p;
-
-  const char* name_ptr;
-  uint32_t name_len;
-  if (*p == '"') {
-    p = scan_quoted(p, end, &name_ptr, &name_len, scratch);
-  } else {
-    name_ptr = p;
-    while (*p != ',') ++p;
-    name_len = static_cast<uint32_t>(p - name_ptr);
-  }
-  // Copy into the arena before the note parser reuses scratch.
-  uint32_t nid = loc.names.intern(name_ptr, name_len);
-  ++p;
-
-  uint32_t note_len = 0;
-  if (*p == '"') {
-    const char* raw = nullptr;
-    p = scan_quoted(p, end, &raw, &note_len, scratch);
-  } else {
-    const char* s = p;
-    while (*p != ',') ++p;
-    note_len = static_cast<uint32_t>(p - s);
-  }
-  ++p;
-
   uint32_t region = 0;
-  while (*p >= '0' && *p <= '9') {
-    region = region * 10u + static_cast<uint32_t>(*p - '0');
-    ++p;
-  }
-  ++p;
+  int64_t cents = 0;
+  const char* next = nullptr;
+};
 
-  int sign = 1;
-  if (*p == '-') {
-    sign = -1;
-    ++p;
-  }
-  int64_t whole = 0;
-  while (*p != '.') {
-    whole = whole * 10 + (*p - '0');
-    ++p;
-  }
-  ++p;
-  int frac = (*p - '0') * 10 + (*(p + 1) - '0');
-  p += 2;
-  int64_t cents = sign * (whole * 100 + frac);
-  if (p < end && *p == '\r') ++p;
-  if (p < end && *p == '\n') ++p;
-
-  uint32_t cid = country_index(w, region);
-  Agg& a = loc.ag[cid];
-  a.count++;
-  a.id_sum += id;
-  a.amount_sum += cents;
-  if (cents < a.amin) a.amin = cents;
-  if (cents > a.amax) a.amax = cents;
-  a.name_bytes += name_len;
-  a.note_bytes += note_len;
-  loc.buckets[cid].push_back(nid);
-  return p;
-}
-
-const char* find_record_start(const char* pos, const char* end) {
-  for (const char* q = pos; q < end; q++) {
-    if (*q != '\n') continue;
-    const char* r = q + 1;
-    if (is_bom(r, end)) r += 3;
-    if (r < end && *r >= '1' && *r <= '9') return r;
+// Closing quote, counting each doubled "" as one escaped quote.
+inline const char* close_quote(const char* p, const char* end, int& esc) {
+  esc = 0;
+  while (p < end) {
+    const char* q = static_cast<const char*>(std::memchr(p, '"', static_cast<size_t>(end - p)));
+    if (!q) return end;
+    if (q + 1 < end && q[1] == '"') {
+      esc++;
+      p = q + 2;
+      continue;
+    }
+    return q;
   }
   return end;
 }
 
-void parse_range(const char* base, const char* p, const char* limit, const char* end,
-                 const World& w, Local& loc) {
-  std::string scratch;
-  scratch.reserve(128);
-  size_t dropped = static_cast<size_t>(p - base);
-  while (p < end) {
-    const char* q = p;
-    if (is_bom(q, end)) q += 3;
-    if (q >= limit || q >= end) break;
-    p = parse_one(q, end, w, loc, scratch);
-    size_t at = static_cast<size_t>(p - base);
-    if (at - dropped >= (1u << 22)) {
-      drop_pages(base, dropped, at);
-      dropped = at;
-    }
+inline int64_t parse_money(const char* s, const char* e) {
+  int sign = 1;
+  if (s < e && *s == '-') {
+    sign = -1;
+    s++;
   }
-  drop_pages(base, dropped, static_cast<size_t>(p - base));
+  const char* dot = s;
+  while (dot < e && *dot != '.') dot++;
+  uint64_t whole = parse_digits(s, dot);
+  int frac = 0;
+  if (dot + 2 < e) frac = (dot[1] - '0') * 10 + (dot[2] - '0');
+  return sign * (static_cast<int64_t>(whole) * 100 + frac);
 }
 
-uint32_t popcount_bits(const uint64_t* b, size_t n) {
-  uint32_t c = 0;
-  for (size_t i = 0; i < n; i++) c += static_cast<uint32_t>(__builtin_popcountll(b[i]));
-  return c;
+View parse_at(const char* p, const char* end) {
+  View v;
+  if (is_bom(p, end)) p += 3;
+  const char* id_b = p;
+  while (p < end && *p != ',') p++;
+  v.id = parse_digits(id_b, p);
+  if (p < end) p++;
+
+  if (p < end && *p == '"') {
+    const char* ns = ++p;
+    int esc = 0;
+    const char* q = close_quote(p, end, esc);
+    v.name = ns;
+    v.name_raw = static_cast<uint32_t>(q - ns);
+    v.name_un = v.name_raw - static_cast<uint32_t>(esc);
+    p = q < end ? q + 1 : end;
+  } else {
+    v.name = p;
+    while (p < end && *p != ',') p++;
+    v.name_raw = v.name_un = static_cast<uint32_t>(p - v.name);
+  }
+  if (p < end && *p == ',') p++;
+
+  if (p < end && *p == '"') {
+    const char* ns = ++p;
+    int esc = 0;
+    const char* q = close_quote(p, end, esc);
+    v.note_un = static_cast<uint32_t>(q - ns) - static_cast<uint32_t>(esc);
+    p = q < end ? q + 1 : end;
+  } else {
+    const char* ns = p;
+    while (p < end && *p != ',') p++;
+    v.note_un = static_cast<uint32_t>(p - ns);
+  }
+  if (p < end && *p == ',') p++;
+
+  const char* rb = p;
+  while (p < end && *p != ',') p++;
+  v.region = static_cast<uint32_t>(parse_digits(rb, p));
+  if (p < end && *p == ',') p++;
+
+  const char* ab = p;
+  while (p < end && *p != '\n') p++;
+  const char* ae = p;
+  if (ae > ab && ae[-1] == '\r') ae--;
+  v.cents = parse_money(ab, ae);
+  v.next = p + (p < end);
+  return v;
+}
+
+const char* find_crlf(const char* p, const char* end) {
+  while (p + 1 < end) {
+    if (p[0] == '\r' && p[1] == '\n') return p + 2;
+    p++;
+  }
+  return end;
 }
 
 void append_u64(std::vector<char>& o, uint64_t x) {
@@ -442,26 +380,20 @@ const char* env_or(const char* key, const char* fallback) {
   return v && *v ? v : fallback;
 }
 
-double mono() {
-  timespec ts{};
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return ts.tv_sec + ts.tv_nsec * 1e-9;
-}
-
-bool want_stats() {
-  const char* e = std::getenv("SD_STATS");
-  return e && *e && *e != '0';
+uint32_t popcount_words(const uint64_t* b) {
+  uint32_t n = 0;
+  for (uint32_t i = 0; i < kWords; i++) n += static_cast<uint32_t>(__builtin_popcountll(b[i]));
+  return n;
 }
 
 }  // namespace
 
 int main() {
-  double t0 = mono();
-  bool st = want_stats();
+  tune_alloc();
   std::string dir = env_or("DATA", "/data");
   std::string outp = std::string(env_or("OUT", "/out")) + "/aggregates.txt";
-  Mapped regions(dir + "/regions.csv");
-  Mapped records(dir + "/records.csv");
+  Mapped regions((dir + "/regions.csv").c_str());
+  Mapped records((dir + "/records.csv").c_str());
 
   World world;
   load_regions(regions, world);
@@ -482,31 +414,97 @@ int main() {
   for (int t = 1; t < T; t++) {
     const char* cut = data + records.len * static_cast<size_t>(t) / static_cast<size_t>(T);
     if (cut < first) cut = first;
-    starts[t] = find_record_start(cut, end);
+    starts[t] = find_crlf(cut, end);
   }
   for (int t = 1; t <= T; t++) {
     if (starts[t] < starts[t - 1]) starts[t] = starts[t - 1];
   }
 
-  std::vector<Local> locals;
-  locals.reserve(static_cast<size_t>(T));
-  for (int t = 0; t < T; t++) locals.emplace_back(countries);
+  Names* names = new Names;
+  std::vector<std::vector<std::vector<uint32_t>>> buckets(static_cast<size_t>(T));
+  for (int t = 0; t < T; t++) buckets[t].resize(countries);
+  std::vector<std::vector<Agg>> ags(static_cast<size_t>(T), std::vector<Agg>(countries));
 
   std::vector<std::thread> pool;
   for (int t = 0; t < T; t++) {
     pool.emplace_back([&, t] {
-      parse_range(data, starts[t], starts[t + 1], end, world, locals[t]);
+      std::vector<Agg>& ag = ags[t];
+      auto& bk = buckets[t];
+      Pend ring[16];
+      int head = 0;
+      int filled = 0;
+      auto drain_one = [&] {
+        Pend e = ring[head];
+        head = (head + 1) & 15;
+        filled--;
+        uint32_t id = names->intern(e.s, e.n, e.h);
+        bk[e.country].push_back(id);
+      };
+      const char* q = starts[t];
+      const char* limit = starts[t + 1];
+      while (q < limit && q < end) {
+        if (q >= limit || q >= end) break;
+        _mm_prefetch(q + 256, _MM_HINT_T0);
+        View v = parse_at(q, end);
+        uint32_t cid = country_index(world, v.region);
+        Agg& a = ag[cid];
+        a.count++;
+        a.id_sum += v.id;
+        a.amount_sum += v.cents;
+        if (v.cents < a.amin) a.amin = v.cents;
+        if (v.cents > a.amax) a.amax = v.cents;
+        a.name_bytes += v.name_un;
+        a.note_bytes += v.note_un;
+        uint32_t h = Names::mix(v.name, v.name_raw);
+        _mm_prefetch(reinterpret_cast<const char*>(&names->tags[h & kMask]), _MM_HINT_T0);
+        _mm_prefetch(reinterpret_cast<const char*>(&names->slots[h & kMask]), _MM_HINT_T0);
+        if (filled == 16) drain_one();
+        ring[(head + filled) & 15] = Pend{cid, v.name, v.name_raw, h};
+        filled++;
+        q = v.next;
+      }
+      while (filled) drain_one();
     });
   }
   for (auto& th : pool) th.join();
-  double t_parse = mono();
+
+  std::vector<uint32_t> distinct(countries);
+  {
+    std::atomic<uint32_t> cursor{0};
+    std::vector<std::thread> counters;
+    int ct = T;
+    for (int t = 0; t < ct; t++) {
+      counters.emplace_back([&, t] {
+        (void)t;
+        std::vector<uint64_t> bits(kWords);
+        for (;;) {
+          uint32_t c = cursor.fetch_add(1, std::memory_order_relaxed);
+          if (c >= countries) break;
+          bool any = false;
+          for (int k = 0; k < T; k++) {
+            if (!buckets[k][c].empty()) {
+              any = true;
+              break;
+            }
+          }
+          if (!any) continue;
+          std::memset(bits.data(), 0, kWords * sizeof(uint64_t));
+          for (int k = 0; k < T; k++) {
+            for (uint32_t id : buckets[k][c]) bits[id >> 6] |= 1ull << (id & 63);
+          }
+          distinct[c] = popcount_words(bits.data());
+        }
+      });
+    }
+    for (auto& th : counters) th.join();
+  }
 
   std::vector<Agg> ag(countries);
-  for (Local& loc : locals) {
+  for (int t = 0; t < T; t++) {
     for (size_t c = 0; c < countries; c++) {
-      Agg& dst = ag[c];
-      const Agg& src = loc.ag[c];
+      const Agg& src = ags[t][c];
       if (src.count == 0) continue;
+      Agg& dst = ag[c];
       dst.count += src.count;
       dst.id_sum += src.id_sum;
       dst.name_bytes += src.name_bytes;
@@ -517,89 +515,12 @@ int main() {
     }
   }
 
-  std::vector<std::vector<uint32_t>> remap(static_cast<size_t>(T));
-  for (int t = 0; t < T; t++) remap[t].resize(locals[t].names.used);
-  const int shards_n = T;
-  std::vector<Intern> shards;
-  shards.reserve(static_cast<size_t>(shards_n));
-  for (int s = 0; s < shards_n; s++) shards.emplace_back(1u << 16);
-  pool.clear();
-  for (int s = 0; s < shards_n; s++) {
-    pool.emplace_back([&, s] {
-      for (int t = 0; t < T; t++) {
-        Intern& src = locals[t].names;
-        auto& mp = remap[t];
-        for (uint32_t id = 0; id < src.used; id++) {
-          uint32_t n = 0;
-          const char* str = src.get(id, n);
-          if ((Intern::mix(str, n) % static_cast<uint32_t>(shards_n)) != static_cast<uint32_t>(s))
-            continue;
-          mp[id] = (static_cast<uint32_t>(s) << 20) | shards[s].intern(str, n);
-        }
-      }
-    });
-  }
-  for (auto& th : pool) th.join();
-  std::vector<uint32_t> id_base(static_cast<size_t>(shards_n) + 1);
-  for (int s = 0; s < shards_n; s++) id_base[s + 1] = id_base[s] + shards[s].used;
-  uint32_t global_used = id_base[shards_n];
-  for (int t = 0; t < T; t++) {
-    for (uint32_t& g : remap[t]) {
-      g = id_base[g >> 20] + (g & ((1u << 20) - 1));
-    }
-    std::vector<Slot>().swap(locals[t].names.slots);
-    std::string().swap(locals[t].names.arena);
-  }
-  double t_merge = mono();
-
-  std::vector<uint32_t> distinct(countries);
-  std::vector<uint32_t> work;
-  work.reserve(countries);
-  for (uint32_t c = 0; c < countries; c++) {
-    if (ag[c].count) work.push_back(c);
-  }
-  std::sort(work.begin(), work.end(), [&](uint32_t a, uint32_t b) {
-    size_t na = 0, nb = 0;
-    for (int t = 0; t < T; t++) {
-      na += locals[t].buckets[a].size();
-      nb += locals[t].buckets[b].size();
-    }
-    return na > nb;
-  });
-
-  std::atomic<uint32_t> next{0};
-  size_t words = (static_cast<size_t>(global_used) + 63) >> 6;
-  if (words == 0) words = 1;
-  pool.clear();
-  for (int t = 0; t < T; t++) {
-    pool.emplace_back([&] {
-      std::vector<uint64_t> bits(words);
-      for (;;) {
-        uint32_t i = next.fetch_add(1, std::memory_order_relaxed);
-        if (i >= work.size()) break;
-        uint32_t c = work[i];
-        std::memset(bits.data(), 0, words * sizeof(uint64_t));
-        for (int k = 0; k < T; k++) {
-          const auto& map = remap[k];
-          for (uint32_t lid : locals[k].buckets[c]) {
-            uint32_t g = map[lid];
-            bits[g >> 6] |= 1ull << (g & 63);
-          }
-        }
-        distinct[c] = popcount_bits(bits.data(), words);
-      }
-    });
-  }
-  for (auto& th : pool) th.join();
-  double t_bits = mono();
-
   std::vector<uint32_t> order;
-  order.reserve(world.codes.size());
-  for (uint32_t c = 0; c < world.unmatched; c++) {
+  order.reserve(world.unmatched);
+  for (uint32_t c = 0; c < world.unmatched; c++)
     if (ag[c].count) order.push_back(c);
-  }
   std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
-    return std::memcmp(world.codes[a].data(), world.codes[b].data(), 3) < 0;
+    return std::memcmp(world.codes.data() + a * 3, world.codes.data() + b * 3, 3) < 0;
   });
   if (ag[world.unmatched].count) order.push_back(world.unmatched);
 
@@ -610,7 +531,7 @@ int main() {
     if (c == world.unmatched) {
       out.insert(out.end(), "_UNMATCHED", "_UNMATCHED" + 10);
     } else {
-      out.insert(out.end(), world.codes[c].data(), world.codes[c].data() + 3);
+      out.insert(out.end(), world.codes.data() + c * 3, world.codes.data() + c * 3 + 3);
     }
     out.push_back(' ');
     append_u64(out, a.count);
@@ -635,10 +556,5 @@ int main() {
   if (fd < 0) die("open output");
   write_all(fd, out.data(), out.size());
   close(fd);
-  if (st) {
-    double t1 = mono();
-    fprintf(stderr, "parse %.3f merge %.3f bits %.3f rest %.3f total %.3f names %u\n",
-            t_parse - t0, t_merge - t_parse, t_bits - t_merge, t1 - t_bits, t1 - t0, global_used);
-  }
   return 0;
 }
