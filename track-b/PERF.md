@@ -12,3 +12,4 @@ Local numbers are a warm run on this 4-core VM. They are not board scores. M is 
 | 5 | Bitmap words are owned by one thread, so the update is a plain or. Term hash is one multiply. Paired with step 4 on this box: median 462 ms to 434 ms, cgroup memory.peak still 70 MB. scc 702 | local | 0.434 | 70 | |
 | 6 | Same program, packed so clang-format LLVM counts 211 lines instead of 702. Paired wall and cgroup memory.peak match step 5 | local | 0.434 | 70 | |
 | 7 | Start-bit token walk. Single-thread tokenize 158 ms to 113 ms. Board candidate: the 4-core VM at 12 threads only moved a few milliseconds. scc 211. Hashes match step 6 | local | | | |
+| 8 | Readable rewrite. Ordinary control flow, no clang-format guard. scc 1072. Paired 12-thread median 436 ms vs 445 ms for step 7, memory.peak about 78 MB. Estimated 59.0 vs 64.2 | local | 0.436 | 78 | 59.0 |
