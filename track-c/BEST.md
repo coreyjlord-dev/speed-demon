@@ -8,4 +8,6 @@ The number that must not regress is the board wall time. A later push has to bea
 | 1 | 2026-10-30 | run-33950e9306be | 395 ms | 160 MB | 37.45 | 32 of 45 | commit a83c542 |
 | 2 | 2026-10-30 | run-a311de2756a7 | 382 ms | 159 MB | 37.83 | 30 of 45 | same binary, re-scored with eca0595 |
 | 3 | 2026-10-30 | run-96be9689589e | 355 ms | 152 MB | 38.69 | 33 of 49 | commit 6cd2cb3. Points rank 35 of 49 |
-| 4 | 2026-10-30 | run-d1920a32c8a2 | 194 ms | 106 MB | 46.49 | 31 of 49 | commit 647c13a. Points rank 34 of 49. Record 49.0 ms (ALL STAR, 72.57 pts) |
+| 4 | 2026-10-30 | run-d1920a32c8a2 | 194 ms | 106 MB | 46.49 | 31 of 49 | commit 647c13a |
+| 5 | 2026-10-30 | run-c3cd8ca0883c | 183 ms | 106 MB | 47.11 | 32 of 51 | same binary, re-scored with f8e67ee. Points rank 35 of 51. This is the floor. Record 49.0 ms (ALL STAR, 72.57 pts) |
+| local | 2026-10-30 | | 137 ms | 66 MB | | | verified local win. Byte-exact full-seed sha256. Sharded name merge, warm 4-thread VM. Not a board floor. |
