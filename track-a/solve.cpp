@@ -1,176 +1,150 @@
-// Track A (Ingest): parallel byte parse, open-addressed endpoint table,
-// exact-size latency arenas, and nth_element percentiles.
-//
-// Every seed's timestamps sit in the same 72 hours, so the hour is a
-// fixed-offset integer, not a date parse. Endpoints are interned once
-// and groups are dense (hour, endpoint id). Latencies stay uint32.
-// Percentiles are nearest-rank: index (p * n + 99) / 100 - 1.
-//
-// The file is mapped and split on newlines. Each worker has its own
-// table and arena; workers never share a write. Results are merged,
-// percentiles run in parallel, then lines are emitted in hour order
-// and unsigned-byte endpoint order.
+// Track A: one SIMD pass, records filed per hour, in-cache select, writer thread.
+// Nearest rank: (p * n + 99) / 100 - 1. A 5xx is status[0] == '5'.
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
+#include <cstring>
+#include <charconv>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
-#include <nmmintrin.h>
+#include <immintrin.h>
+#include <malloc.h>
 #include <string>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
-#include <utility>
 #include <vector>
 
 namespace {
 
 constexpr int kHours = 72;
-constexpr uint32_t kEmpty = 0xffffffffu;
+constexpr uint32_t kCap = 2048;
+constexpr uint32_t kSlots = 4096;
+constexpr uint32_t kBlock = 2048;
 
-[[noreturn]] void die(const char* msg) {
-  fprintf(stderr, "track-a: %s\n", msg);
-  exit(1);
+[[noreturn]] void die(const char* m) {
+  std::fprintf(stderr, "track-a: %s\n", m);
+  std::exit(1);
 }
 
-int worker_count() {
-  if (const char* env = std::getenv("SD_THREADS")) {
-    int n = std::atoi(env);
+void tune() {
+  prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
+  mallopt(M_TRIM_THRESHOLD, 128 * 1024);
+  mallopt(M_MMAP_THRESHOLD, 256 * 1024);
+  mallopt(M_TOP_PAD, 0);
+}
+
+int nthreads() {
+  if (const char* e = std::getenv("SD_THREADS")) {
+    int n = std::atoi(e);
     if (n >= 1 && n <= 64) return n;
   }
-  unsigned hc = std::thread::hardware_concurrency();
-  if (hc == 0) return 1;
-  if (hc > 12) hc = 12;
-  return static_cast<int>(hc);
+  unsigned h = std::thread::hardware_concurrency();
+  if (!h) return 1;
+  if (h >= 8) return 6;
+  return (int)h;
 }
 
 struct Mapped {
   int fd = -1;
   size_t len = 0;
-  const char* data = nullptr;
-
-  explicit Mapped(const std::string& path) {
-    fd = ::open(path.c_str(), O_RDONLY);
-    if (fd < 0) die("open input");
+  const char* p = nullptr;
+  explicit Mapped(const char* path) {
+    fd = ::open(path, O_RDONLY);
+    if (fd < 0) die("open");
     struct stat st {};
-    if (fstat(fd, &st) != 0) die("fstat");
-    len = static_cast<size_t>(st.st_size);
-    if (len == 0) return;
-    void* p = ::mmap(nullptr, len, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (p == MAP_FAILED) die("mmap");
-    data = static_cast<const char*>(p);
-    madvise(const_cast<char*>(data), len, MADV_SEQUENTIAL);
+    if (fstat(fd, &st)) die("stat");
+    len = (size_t)st.st_size;
+    if (!len) return;
+    void* m = ::mmap(nullptr, len, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (m == MAP_FAILED) die("mmap");
+    p = (const char*)m;
+    madvise((void*)p, len, MADV_RANDOM);
   }
-
   ~Mapped() {
-    if (data) munmap(const_cast<char*>(data), len);
+    if (p) munmap((void*)p, len);
     if (fd >= 0) close(fd);
   }
-
-  Mapped(const Mapped&) = delete;
-  Mapped& operator=(const Mapped&) = delete;
 };
 
-struct Arena {
-  std::vector<uint32_t*> blocks;
-  uint32_t* cur = nullptr;
-  uint32_t left = 0;
+void drop_pages(const char* base, size_t a, size_t b) {
+  uintptr_t x = ((uintptr_t)(base + a) + 4095) & ~(uintptr_t)4095;
+  uintptr_t y = (uintptr_t)(base + b) & ~(uintptr_t)4095;
+  if (y > x) madvise((void*)x, y - x, MADV_DONTNEED);
+}
 
-  uint32_t* alloc(uint32_t n) {
-    if (n > left) {
-      uint32_t sz = std::max(n, 1u << 20);
-      cur = new uint32_t[sz];
-      blocks.push_back(cur);
-      left = sz;
+struct Rec {
+  uint32_t lat;
+  uint16_t id;
+  uint16_t err;
+};
+
+struct Block {
+  Block* next;
+  uint32_t n;
+  Rec r[kBlock];
+};
+
+struct Hour {
+  Block* head = nullptr;
+  Block* tail = nullptr;
+  void add(Rec x) {
+    if (!tail || tail->n == kBlock) {
+      auto* b = (Block*)std::malloc(sizeof(Block));
+      if (!b) die("oom");
+      b->next = nullptr;
+      b->n = 0;
+      if (tail) tail->next = b;
+      else head = b;
+      tail = b;
     }
-    uint32_t* p = cur;
-    cur += n;
-    left -= n;
-    return p;
+    tail->r[tail->n++] = x;
   }
-
-  ~Arena() {
-    for (uint32_t* b : blocks) delete[] b;
+  void release() {
+    for (Block* b = head; b;) {
+      Block* n = b->next;
+      std::free(b);
+      b = n;
+    }
+    head = tail = nullptr;
   }
-
-  Arena() = default;
-  Arena(const Arena&) = delete;
-  Arena& operator=(const Arena&) = delete;
-};
-
-struct Group {
-  uint32_t* lat = nullptr;
-  uint32_t n = 0;
-  uint32_t cap = 0;
-  uint32_t errors = 0;
-  uint32_t p50 = 0;
-  uint32_t p95 = 0;
-  uint32_t p99 = 0;
 };
 
 struct Slot {
-  uint64_t hash = 0;
-  uint32_t off = 0;
-  uint32_t len = 0;
-  uint32_t id = kEmpty;
+  uint64_t h = 0;
+  uint32_t off = 0, len = 0, id = 0;
 };
 
-struct Table {
-  Arena arena;
+struct Worker {
   std::string bytes;
   std::vector<Slot> slots;
-  std::vector<Group> g[kHours];
-  uint32_t mask = 0;
-  uint32_t used = 0;
-  uint32_t nids = 0;
-
-  Table() { rehash(1024); }
-
-  void rehash(uint32_t cap) {
-    std::vector<Slot> ns(cap);
-    uint32_t m = cap - 1;
-    for (const Slot& sl : slots) {
-      if (sl.id == kEmpty) continue;
-      uint32_t i = static_cast<uint32_t>(sl.hash) & m;
-      while (ns[i].id != kEmpty) i = (i + 1) & m;
-      ns[i] = sl;
-    }
-    slots.swap(ns);
-    mask = m;
+  uint32_t mask = kSlots - 1, nids = 0;
+  const char* blob = nullptr;
+  Hour hour[kHours];
+  Worker() {
+    bytes.reserve(1 << 16);
+    slots.resize(kSlots);
+    blob = bytes.data();
   }
-
-  void release() {
-    for (uint32_t* b : arena.blocks) delete[] b;
-    arena.blocks.clear();
-    arena.cur = nullptr;
-    arena.left = 0;
-    std::string().swap(bytes);
-    std::vector<Slot>().swap(slots);
-    for (int hour = 0; hour < kHours; hour++) std::vector<Group>().swap(g[hour]);
-  }
-
   uint32_t intern(const char* s, uint32_t n, uint64_t h) {
-    if ((used + 1) * 10 >= (mask + 1) * 7) rehash((mask + 1) * 2);
-    uint32_t i = static_cast<uint32_t>(h) & mask;
+    uint32_t i = (uint32_t)h & mask;
     for (;;) {
       Slot& sl = slots[i];
-      if (sl.id == kEmpty) {
-        sl.hash = h;
-        sl.off = static_cast<uint32_t>(bytes.size());
+      if (sl.h == h && sl.len == n) {
+        if (std::memcmp(blob + sl.off, s, n) == 0) return sl.id;
+      } else if (!sl.h) {
+        if (nids >= kCap) die("endpoints");
+        sl.h = h;
+        sl.off = (uint32_t)bytes.size();
         sl.len = n;
         sl.id = nids++;
         bytes.append(s, n);
-        used++;
-        for (int hour = 0; hour < kHours; hour++) g[hour].emplace_back();
-        return sl.id;
-      }
-      if (sl.hash == h && sl.len == n &&
-          std::memcmp(bytes.data() + sl.off, s, n) == 0) {
+        blob = bytes.data();
         return sl.id;
       }
       i = (i + 1) & mask;
@@ -178,336 +152,338 @@ struct Table {
   }
 };
 
-// Hour index in the fixed window starting 2026-10-30T18:00Z.
-int hour_index(const char* ts) {
-  int month = (ts[5] - '0') * 10 + (ts[6] - '0');
-  int day = (ts[8] - '0') * 10 + (ts[9] - '0');
-  int hour = (ts[11] - '0') * 10 + (ts[12] - '0');
-  int day_i = 0;
-  if (month == 10 && day == 30) day_i = 0;
-  else if (month == 10 && day == 31) day_i = 1;
-  else if (month == 11 && day == 1) day_i = 2;
-  else day_i = 3;  // 2026-11-02, the last day of the window
-  return day_i * 24 + hour - 18;
+inline int hour_of(const char* t) {
+  int month = t[6] - '0';
+  int day = (t[8] - '0') * 10 + (t[9] - '0');
+  int hr = (t[11] - '0') * 10 + (t[12] - '0');
+  return (month ? day + 1 : day - 30) * 24 + hr - 18;
 }
 
-void push_lat(Table& t, Group& g, uint32_t lat) {
-  if (g.n == g.cap) {
-    uint32_t nc = g.cap ? g.cap * 2 : 8;
-    uint32_t* p = t.arena.alloc(nc);
-    if (g.n) std::memcpy(p, g.lat, g.n * sizeof(uint32_t));
-    g.lat = p;
-    g.cap = nc;
-  }
-  g.lat[g.n++] = lat;
-}
-
-// Drop file pages this worker has finished so peak RSS is the live
-// window plus the latency arena, not the whole log.
-void drop_pages(const char* base, size_t from, size_t to) {
-  uintptr_t pa = (reinterpret_cast<uintptr_t>(base + from) + 4095u) & ~uintptr_t(4095);
-  uintptr_t pb = reinterpret_cast<uintptr_t>(base + to) & ~uintptr_t(4095);
-  if (pb > pa) madvise(reinterpret_cast<void*>(pa), pb - pa, MADV_DONTNEED);
-}
-
-uint64_t hash_endpoint(const char* s, uint32_t n) {
+inline uint64_t hash_ep(const char* s, uint32_t n) {
   uint64_t h = 0;
   uint32_t i = 0;
   for (; i + 8 <= n; i += 8) {
     uint64_t v;
     std::memcpy(&v, s + i, 8);
-    h = _mm_crc32_u64(h, v);
+    h ^= v;
   }
-  uint64_t tail = 0;
-  if (i < n) std::memcpy(&tail, s + i, n - i);
-  h = _mm_crc32_u64(h, tail ^ n);
+  if (i < n) {
+    uint64_t v = 0;
+    std::memcpy(&v, s + i, n - i);
+    h ^= v;
+  }
+  h ^= (uint64_t)n * 0x9E3779B185EBCA87ull;
+  h *= 0x100000001B3ull;
   return h ? h : 1;
 }
 
-// First byte index of 0x20 in v, or 8 if none. ASCII only.
-inline int space_in_u64(uint64_t v) {
-  uint64_t x = v ^ 0x2020202020202020ull;
-  uint64_t y = (x - 0x0101010101010101ull) & ~x & 0x8080808080808080ull;
-  if (y == 0) return 8;
-  return __builtin_ctzll(y) >> 3;
+inline uint32_t parse_lat(const char* d, int k, const char* lim) {
+  if (k <= 8 && d + 8 <= lim) {
+    uint64_t v;
+    std::memcpy(&v, d, 8);
+    uint64_t mask = k == 8 ? ~0ull : (1ull << (k * 8)) - 1ull;
+    v &= mask & 0x0F0F0F0F0F0F0F0Full;
+    uint32_t x = v & 255u;
+    x = x * 10u + ((v >> 8) & 255u);
+    x = x * 10u + ((v >> 16) & 255u);
+    x = x * 10u + ((v >> 24) & 255u);
+    x = x * 10u + (uint32_t)((v >> 32) & 255u);
+    x = x * 10u + (uint32_t)((v >> 40) & 255u);
+    x = x * 10u + (uint32_t)((v >> 48) & 255u);
+    x = x * 10u + (uint32_t)(v >> 56);
+    static const uint32_t div10[9] = {100000000u, 10000000u, 1000000u, 100000u, 10000u,
+                                       1000u,      100u,      10u,      1u};
+    return x / div10[k];
+  }
+  uint32_t x = 0;
+  for (int i = 0; i < k; ++i) x = x * 10u + (uint32_t)(d[i] - '0');
+  return x;
 }
 
-void parse_range(const char* base, size_t begin, size_t end, Table& t) {
-  const char* p = base + begin;
-  const char* limit = base + end;
+// Spaces and the newline in the 64 bytes at `m`. s0, s1, s2 are the first three spaces.
+inline bool scan64(const char* m, const char* lim, int& s0, int& s1, int& s2, int& npos) {
+  if (m + 64 > lim) return false;
+  __m256i a = _mm256_loadu_si256((const __m256i*)m);
+  __m256i b = _mm256_loadu_si256((const __m256i*)(m + 32));
+  __m256i sp = _mm256_set1_epi8(' ');
+  __m256i nl = _mm256_set1_epi8('\n');
+  uint64_t ms = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(a, sp));
+  ms |= (uint64_t)(uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(b, sp)) << 32;
+  uint64_t mn = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(a, nl));
+  mn |= (uint64_t)(uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(b, nl)) << 32;
+  if (!mn || !ms) return false;
+  npos = __builtin_ctzll(mn);
+  s0 = __builtin_ctzll(ms);
+  if (s0 >= npos) return false;
+  ms &= ms - 1;
+  if (!ms) return false;
+  s1 = __builtin_ctzll(ms);
+  if (s1 >= npos) return false;
+  ms &= ms - 1;
+  if (!ms) return false;
+  s2 = __builtin_ctzll(ms);
+  return s2 < npos;
+}
+
+inline void take(Worker& w, const char* line, const char* nl, const char* lim) {
+  const char* m = line + 28;
+  int s0, s1, s2, npos;
+  const char* ep;
+  uint32_t elen, err, lat;
+  if (scan64(m, lim, s0, s1, s2, npos)) {
+    ep = m + s0 + 1;
+    elen = (uint32_t)(s1 - s0 - 1);
+    err = m[s1 + 1] == '5';
+    lat = parse_lat(m + s2 + 1, npos - s2 - 1, lim);
+  } else {
+    const char* p = m;
+    while (*p != ' ') ++p;
+    ep = p + 1;
+    const char* ee = ep;
+    while (*ee != ' ') ++ee;
+    elen = (uint32_t)(ee - ep);
+    err = ee[1] == '5';
+    const char* d = ee + 5;
+    lat = parse_lat(d, (int)(nl - d), lim);
+  }
+  int hr = hour_of(line);
+  uint32_t id = w.intern(ep, elen, hash_ep(ep, elen));
+  w.hour[hr].add(Rec{lat, (uint16_t)id, (uint16_t)err});
+}
+
+void parse_slice(Worker& w, const char* base, size_t begin, size_t end, size_t flen) {
+  const char* lim = base + flen;
+  const char* line = base + begin;
+  const char* e = base + end;
+  const char* p = line;
+  const __m256i nlv = _mm256_set1_epi8('\n');
   size_t dropped = begin;
-  while (p < limit) {
-    int hour = hour_index(p);
-    p += 28;  // 27-byte timestamp and the following space
-    while (*p != ' ') p++;
-    p++;
-    const char* es = p;
-    uint64_t h = 0;
-    for (;;) {
-      uint64_t v;
-      std::memcpy(&v, p, 8);
-      int k = space_in_u64(v);
-      if (k < 8) {
-        if (k) {
-          uint64_t mask = (1ull << (k * 8)) - 1ull;
-          h = _mm_crc32_u64(h, v & mask);
-        }
-        p += k;
-        break;
-      }
-      h = _mm_crc32_u64(h, v);
-      p += 8;
+  while (p + 32 <= e) {
+    uint32_t m =
+        (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i*)p), nlv));
+    while (m) {
+      const char* nl = p + __builtin_ctz(m);
+      take(w, line, nl, lim);
+      line = nl + 1;
+      m &= m - 1;
     }
-    uint32_t elen = static_cast<uint32_t>(p - es);
-    h = _mm_crc32_u64(h, elen);
-    if (h == 0) h = 1;
-    p++;  // space before status
-    bool err = (*p == '5');
-    p += 4;  // three status digits and the space
-    uint32_t lat = 0;
-    while (*p != '\n') {
-      lat = lat * 10u + static_cast<uint32_t>(*p - '0');
-      p++;
+    p += 32;
+    size_t at = (size_t)(line - base);
+    if (at > dropped + (1u << 20)) {
+      drop_pages(base, dropped, at - 4096);
+      dropped = at - 4096;
     }
-    p++;
-    uint32_t id = t.intern(es, elen, h);
-    Group& g = t.g[hour][id];
-    push_lat(t, g, lat);
-    if (err) g.errors++;
-    size_t at = static_cast<size_t>(p - base);
-    if (at - dropped > (4u << 20)) {
-      drop_pages(base, dropped, at);
-      dropped = at;
-    }
+  }
+  while (line < e) {
+    const char* nl = line;
+    while (nl < e && *nl != '\n') ++nl;
+    if (nl >= e) break;
+    take(w, line, nl, lim);
+    line = nl + 1;
   }
   drop_pages(base, dropped, end);
 }
 
-void append_group(Table& dst, Group& g, const uint32_t* src, uint32_t n, uint32_t errors) {
-  if (n) {
-    if (g.n + n > g.cap) {
-      uint32_t nc = std::max(g.n + n, g.cap ? g.cap * 2 : n);
-      uint32_t* p = dst.arena.alloc(nc);
-      if (g.n) std::memcpy(p, g.lat, g.n * sizeof(uint32_t));
-      g.lat = p;
-      g.cap = nc;
+void isort(uint32_t* a, uint32_t n) {
+  for (uint32_t i = 1; i < n; ++i) {
+    uint32_t v = a[i], j = i;
+    while (j && a[j - 1] > v) {
+      a[j] = a[j - 1];
+      --j;
     }
-    std::memcpy(g.lat + g.n, src, n * sizeof(uint32_t));
-    g.n += n;
+    a[j] = v;
   }
-  g.errors += errors;
 }
 
-void percentiles(Group& g) {
-  uint32_t n = g.n;
-  uint32_t i50 = static_cast<uint32_t>((50ull * n + 99) / 100 - 1);
-  uint32_t i95 = static_cast<uint32_t>((95ull * n + 99) / 100 - 1);
-  uint32_t i99 = static_cast<uint32_t>((99ull * n + 99) / 100 - 1);
-  uint32_t* a = g.lat;
-  std::nth_element(a, a + i99, a + n);
-  g.p99 = a[i99];
-  std::nth_element(a, a + i95, a + i99 + 1);
-  g.p95 = a[i95];
-  std::nth_element(a, a + i50, a + i95 + 1);
-  g.p50 = a[i50];
+void select3(uint32_t* a, uint32_t n, uint32_t& p50, uint32_t& p95, uint32_t& p99) {
+  uint32_t i50 = (uint32_t)((50ull * n + 99) / 100 - 1);
+  uint32_t i95 = (uint32_t)((95ull * n + 99) / 100 - 1);
+  uint32_t i99 = (uint32_t)((99ull * n + 99) / 100 - 1);
+  if (n <= 64) {
+    isort(a, n);
+  } else {
+    std::nth_element(a, a + i99, a + n);
+    std::nth_element(a, a + i95, a + i99 + 1);
+    std::nth_element(a, a + i50, a + i95 + 1);
+  }
+  p50 = a[i50];
+  p95 = a[i95];
+  p99 = a[i99];
 }
 
-char* fmt_u32(char* w, uint32_t x) {
-  char tmp[10];
-  int n = 0;
-  do {
-    tmp[n++] = static_cast<char>('0' + x % 10);
-    x /= 10;
-  } while (x);
-  while (n--) *w++ = tmp[n];
-  return w;
+void put_u32(char*& w, uint32_t x) {
+  auto r = std::to_chars(w, w + 12, x);
+  w = r.ptr;
 }
 
-void init_hours(char out[kHours][21]) {
-  for (int i = 0; i < kHours; i++) {
-    int total = i + 18;
-    int day = total / 24;
-    int hour = total % 24;
-    int month = 10;
-    int dom = 30;
-    if (day == 1) {
-      month = 10;
-      dom = 31;
-    } else if (day == 2) {
+struct Piece {
+  std::string text;
+  std::atomic<int> ready{0};
+};
+
+}  // namespace
+
+int main() {
+  tune();
+  const char* data = std::getenv("DATA");
+  const char* outd = std::getenv("OUT");
+  std::string in = std::string(data && *data ? data : "/data") + "/requests.log";
+  std::string outp = std::string(outd && *outd ? outd : "/out") + "/summary.txt";
+  Mapped file(in.c_str());
+  FILE* fp = std::fopen(outp.c_str(), "wb");
+  if (!fp) die("out");
+  if (!file.len) {
+    std::fclose(fp);
+    return 0;
+  }
+  int T = nthreads();
+  std::vector<size_t> cut(T + 1);
+  cut[0] = 0;
+  cut[T] = file.len;
+  for (int t = 1; t < T; ++t) {
+    size_t pos = file.len * (size_t)t / (size_t)T;
+    if (pos)
+      while (pos < file.len && file.p[pos - 1] != '\n') ++pos;
+    cut[t] = pos;
+  }
+  std::vector<Worker> ws(T);
+  {
+    std::vector<std::thread> pool;
+    for (int t = 0; t < T; ++t)
+      pool.emplace_back([&, t] {
+        if (cut[t] < cut[t + 1]) parse_slice(ws[t], file.p, cut[t], cut[t + 1], file.len);
+      });
+    for (auto& th : pool) th.join();
+  }
+
+  struct Name {
+    const char* s;
+    uint32_t n;
+    uint16_t tid, lid;
+  };
+  std::vector<Name> names;
+  for (int t = 0; t < T; ++t)
+    for (const Slot& sl : ws[t].slots)
+      if (sl.h) names.push_back({ws[t].bytes.data() + sl.off, sl.len, (uint16_t)t, (uint16_t)sl.id});
+  std::sort(names.begin(), names.end(), [](const Name& a, const Name& b) {
+    int c = std::memcmp(a.s, b.s, std::min(a.n, b.n));
+    return c ? c < 0 : a.n < b.n;
+  });
+  std::string blob;
+  blob.reserve(1 << 16);
+  std::vector<uint32_t> eoff, elen;
+  std::vector<std::vector<uint32_t>> rank(T);
+  for (int t = 0; t < T; ++t) rank[t].assign(kCap, 0);
+  uint32_t nids = 0;
+  for (size_t i = 0; i < names.size(); ++i) {
+    bool same = i && names[i].n == names[i - 1].n &&
+                std::memcmp(names[i].s, names[i - 1].s, names[i].n) == 0;
+    if (!same) {
+      eoff.push_back((uint32_t)blob.size());
+      elen.push_back(names[i].n);
+      blob.append(names[i].s, names[i].n);
+      ++nids;
+    }
+    rank[names[i].tid][names[i].lid] = nids - 1;
+  }
+
+  char hours[kHours][21];
+  for (int i = 0; i < kHours; ++i) {
+    int total = i + 18, day = total / 24, hr = total % 24, month = 10, dom = 30;
+    if (day == 1) dom = 31;
+    else if (day == 2) {
       month = 11;
       dom = 1;
     } else if (day == 3) {
       month = 11;
       dom = 2;
     }
-    std::snprintf(out[i], 21, "%04d-%02d-%02dT%02d:00:00Z", 2026, month, dom, hour);
-  }
-}
-
-const char* env_or(const char* key, const char* fallback) {
-  const char* v = std::getenv(key);
-  return v && *v ? v : fallback;
-}
-
-void write_all(int fd, const char* p, size_t n) {
-  while (n) {
-    ssize_t k = ::write(fd, p, n);
-    if (k < 0) die("write");
-    p += k;
-    n -= static_cast<size_t>(k);
-  }
-}
-
-}  // namespace
-
-int main() {
-  using Clock = std::chrono::steady_clock;
-  auto t0 = Clock::now();
-  auto ms = [&] {
-    return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
-  };
-  bool stats = std::getenv("SD_STATS") != nullptr;
-  std::string in = std::string(env_or("DATA", "/data")) + "/requests.log";
-  std::string outp = std::string(env_or("OUT", "/out")) + "/summary.txt";
-  Mapped file(in);
-
-  int T = worker_count();
-  if (file.len == 0) {
-    int fd = ::open(outp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) die("open output");
-    close(fd);
-    return 0;
+    std::snprintf(hours[i], 21, "%04d-%02d-%02dT%02d:00:00Z", 2026, month, dom, hr);
   }
 
-  std::vector<size_t> cuts(T + 1);
-  cuts[0] = 0;
-  cuts[T] = file.len;
-  for (int t = 1; t < T; t++) {
-    size_t pos = file.len * static_cast<size_t>(t) / static_cast<size_t>(T);
-    if (pos > 0) {
-      while (pos < file.len && file.data[pos - 1] != '\n') pos++;
+  Piece piece[kHours];
+  std::thread writer([&] {
+    for (int h = 0; h < kHours; ++h) {
+      while (!piece[h].ready.load(std::memory_order_acquire)) _mm_pause();
+      if (!piece[h].text.empty())
+        std::fwrite(piece[h].text.data(), 1, piece[h].text.size(), fp);
+      std::string().swap(piece[h].text);
     }
-    cuts[t] = pos;
-  }
-  for (int t = 1; t <= T; t++) {
-    if (cuts[t] < cuts[t - 1]) cuts[t] = cuts[t - 1];
-  }
-
-  std::vector<Table> locals(static_cast<size_t>(T));
-  std::vector<std::thread> pool;
-  pool.reserve(static_cast<size_t>(T));
-  for (int t = 0; t < T; t++) {
-    pool.emplace_back([&, t] {
-      if (cuts[t] < cuts[t + 1]) {
-        parse_range(file.data, cuts[t], cuts[t + 1], locals[t]);
-      }
-    });
-  }
-  for (auto& th : pool) th.join();
-  if (stats) fprintf(stderr, "parse %.1f ms\n", ms());
-
-  Table global;
-  for (Table& loc : locals) {
-    std::vector<uint32_t> map(loc.nids);
-    for (const Slot& sl : loc.slots) {
-      if (sl.id == kEmpty) continue;
-      map[sl.id] = global.intern(loc.bytes.data() + sl.off, sl.len, sl.hash);
-    }
-    for (int hour = 0; hour < kHours; hour++) {
-      for (uint32_t id = 0; id < loc.nids; id++) {
-        Group& src = loc.g[hour][id];
-        if (src.n == 0) continue;
-        append_group(global, global.g[hour][map[id]], src.lat, src.n, src.errors);
-      }
-    }
-    loc.release();
-  }
-  if (stats) fprintf(stderr, "merge %.1f ms\n", ms());
-
-  struct Job {
-    int hour;
-    uint32_t id;
-  };
-  std::vector<Job> jobs;
-  jobs.reserve(global.nids * 8);
-  for (int hour = 0; hour < kHours; hour++) {
-    for (uint32_t id = 0; id < global.nids; id++) {
-      if (global.g[hour][id].n) jobs.push_back({hour, id});
-    }
-  }
-  std::atomic<size_t> next{0};
-  std::vector<std::thread> pct;
-  int pt = std::min(T, std::max(1, static_cast<int>(jobs.size())));
-  for (int t = 0; t < pt; t++) {
-    pct.emplace_back([&] {
-      for (;;) {
-        size_t i = next.fetch_add(1, std::memory_order_relaxed);
-        if (i >= jobs.size()) break;
-        percentiles(global.g[jobs[i].hour][jobs[i].id]);
-      }
-    });
-  }
-  for (auto& th : pct) th.join();
-  if (stats) fprintf(stderr, "pct %.1f ms\n", ms());
-
-  char hours[kHours][21];
-  init_hours(hours);
-
-  std::vector<uint32_t> off(global.nids), len(global.nids);
-  for (const Slot& sl : global.slots) {
-    if (sl.id == kEmpty) continue;
-    off[sl.id] = sl.off;
-    len[sl.id] = sl.len;
-  }
-  // One bytewise order, reused for every hour.
-  std::vector<uint32_t> order(global.nids);
-  for (uint32_t id = 0; id < global.nids; id++) order[id] = id;
-  std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
-    uint32_t na = len[a], nb = len[b];
-    int c = std::memcmp(global.bytes.data() + off[a], global.bytes.data() + off[b], std::min(na, nb));
-    if (c != 0) return c < 0;
-    return na < nb;
   });
 
-  std::vector<char> out(12u << 20);
-  char* w = out.data();
-  char* wend = out.data() + out.size();
-  for (int hour = 0; hour < kHours; hour++) {
-    for (uint32_t id : order) {
-      const Group& g = global.g[hour][id];
-      if (g.n == 0) continue;
-      if (wend - w < 256) {
-        size_t at = static_cast<size_t>(w - out.data());
-        out.resize(out.size() * 2);
-        w = out.data() + at;
-        wend = out.data() + out.size();
+  std::atomic<int> next{0};
+  std::vector<std::thread> hw;
+  for (int t = 0; t < T; ++t) {
+    hw.emplace_back([&] {
+      for (;;) {
+        int h = next.fetch_add(1, std::memory_order_relaxed);
+        if (h >= kHours) break;
+        uint32_t cnt[kCap] = {};
+        uint32_t er[kCap] = {};
+        uint32_t N = 0;
+        for (int w = 0; w < T; ++w) {
+          for (Block* b = ws[w].hour[h].head; b; b = b->next) {
+            for (uint32_t i = 0; i < b->n; ++i) {
+              uint32_t g = rank[w][b->r[i].id];
+              cnt[g]++;
+              er[g] += b->r[i].err;
+              ++N;
+            }
+          }
+        }
+        std::string text;
+        if (N) {
+          uint32_t pref[kCap], cur[kCap], s = 0;
+          for (uint32_t g = 0; g < nids; ++g) {
+            pref[g] = s;
+            s += cnt[g];
+          }
+          std::memcpy(cur, pref, nids * sizeof(uint32_t));
+          std::vector<uint32_t> lat(N);
+          for (int w = 0; w < T; ++w) {
+            for (Block* b = ws[w].hour[h].head; b; b = b->next) {
+              for (uint32_t i = 0; i < b->n; ++i)
+                lat[cur[rank[w][b->r[i].id]]++] = b->r[i].lat;
+            }
+          }
+          text.reserve(N);
+          const char* bp = blob.data();
+          for (uint32_t g = 0; g < nids; ++g) {
+            if (!cnt[g]) continue;
+            uint32_t p50, p95, p99;
+            select3(lat.data() + pref[g], cnt[g], p50, p95, p99);
+            char line[256];
+            char* o = line;
+            std::memcpy(o, hours[h], 20);
+            o += 20;
+            *o++ = ' ';
+            std::memcpy(o, bp + eoff[g], elen[g]);
+            o += elen[g];
+            *o++ = ' ';
+            put_u32(o, cnt[g]);
+            *o++ = ' ';
+            put_u32(o, p50);
+            *o++ = ' ';
+            put_u32(o, p95);
+            *o++ = ' ';
+            put_u32(o, p99);
+            *o++ = ' ';
+            put_u32(o, er[g]);
+            *o++ = ' ';
+            put_u32(o, (uint32_t)((uint64_t)er[g] * 1000000ull / cnt[g]));
+            *o++ = '\n';
+            text.append(line, (size_t)(o - line));
+          }
+        }
+        for (int w = 0; w < T; ++w) ws[w].hour[h].release();
+        piece[h].text = std::move(text);
+        piece[h].ready.store(1, std::memory_order_release);
       }
-      std::memcpy(w, hours[hour], 20);
-      w += 20;
-      *w++ = ' ';
-      std::memcpy(w, global.bytes.data() + off[id], len[id]);
-      w += len[id];
-      *w++ = ' ';
-      w = fmt_u32(w, g.n);
-      *w++ = ' ';
-      w = fmt_u32(w, g.p50);
-      *w++ = ' ';
-      w = fmt_u32(w, g.p95);
-      *w++ = ' ';
-      w = fmt_u32(w, g.p99);
-      *w++ = ' ';
-      w = fmt_u32(w, g.errors);
-      *w++ = ' ';
-      w = fmt_u32(w, static_cast<uint32_t>(static_cast<uint64_t>(g.errors) * 1000000ull / g.n));
-      *w++ = '\n';
-    }
+    });
   }
-  out.resize(static_cast<size_t>(w - out.data()));
-  if (stats) fprintf(stderr, "fmt %.1f ms\n", ms());
-
-  int fd = ::open(outp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-  if (fd < 0) die("open output");
-  write_all(fd, out.data(), out.size());
-  close(fd);
+  for (auto& th : hw) th.join();
+  writer.join();
+  std::fclose(fp);
+  malloc_trim(0);
   return 0;
 }

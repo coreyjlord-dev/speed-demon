@@ -4,7 +4,7 @@ Group 3.1M request lines by UTC hour and endpoint, then emit count, nearest-rank
 
 ## Approach
 
-The timestamp is a fixed 27-byte field inside one 72-hour window, so the hour is a few digits at fixed offsets, not a calendar parse. Each worker maps the file, takes a newline-aligned slice, and interns endpoints in an open-addressed table keyed by a 64-bit hash. Latencies for a group live in a bump arena, so a hot endpoint does not bounce through the allocator. After the slices merge, each group runs three `nth_element` calls at the nearest-rank indexes `(p * n + 99) / 100 - 1`. Lines come out hour by hour, endpoints in unsigned byte order.
+The timestamp is a fixed 27-byte field inside one 72-hour window, so the hour is a few digits at fixed offsets, not a calendar parse. One pass files each request into that hour. A 64-byte compare finds the spaces and the newline after the timestamp. When parsing finishes, each hour is counting-sorted by endpoint and the three nearest ranks are taken while that hour is still in cache. A writer thread emits hours in order. Transparent huge pages are disabled and glibc is asked to return freed blocks, so the resident set tracks live records rather than old arenas.
 
 Status is an error exactly when the first digit is `5` (500–599). Duplicate lines both count. Workers equal one per physical core when the run exposes hyperthreads.
 

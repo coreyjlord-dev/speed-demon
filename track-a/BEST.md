@@ -1,12 +1,17 @@
 # Track A best
 
-The number that must not regress is the board wall time. A later push has to beat the best board T in this table.
+The number that must not regress is the board wall time. A later push has to beat the best board T in this table. Local points use the same K formula; a local point gain is recorded as VERIFIED-WIN before the board re-scores it.
 
 | # | When (UTC) | Board run | Board T | Board RSS | Points | Rank | Notes |
 |---|---|---|---|---|---|---|---|
 | 0 | | | 32.05 s | 228 MB | 0 | | reference on the scoring box |
 | 1 | 2026-10-30 | run-e7963b19373b | 121.3 ms | 129 MB | 56.39 | 32 of 53 | commit a83c542 |
 | 2 | 2026-10-30 | run-c3130c580f05 | 75.4 ms | 110 MB | 61.65 | 23 of 53 | commit eca0595. Record 22.7 ms (Kirk Mates, 83.92 pts) |
-| 3 | 2026-10-30 | run-f1a16cd3b5e5 | 74.6 ms | 111 MB | 61.72 | 24 of 59 | same A binary, re-scored with b48fa90. This is the time floor. |
-| 4 | 2026-10-30 | run-63df8ddfa073 | 74.8 ms | 110 MB | 61.75 | 24 of 59 | same binary, ae68be4. Points were higher than the 74.6 ms run because RSS dipped |
-| 5 | 2026-10-30 | run-fe950133b6c1 | 73.6 ms | 110 MB | 61.89 | 26 of 62 | commit 532829d, same A source, re-scored. Points rank 31 of 62. S=514. This is the floor |
+| 3 | 2026-10-30 | run-f1a16cd3b5e5 | 74.6 ms | 111 MB | 61.72 | 23 of 55 | same A binary, re-scored with b48fa90. Points rank 28 of 55. The 6cd2cb3 re-run was 76.9 ms, so 74.6 ms stays the floor |
+| 4 | 2026-10-30 | local | 108.8 ms | 23.3 MB | | | static 4-core warm. Previous local static binary 109.4 ms / 62.5 MB. Same time, RSS 62.5 → 23.3. Local points about 60.1 → 64.4 at S=514 |
+| 5 | 2026-10-30 | run-fe950133b6c1 | 73.6 ms | 110 MB | 61.89 | 26 of 62 | commit 532829d, same previous source. Points rank 31 of 62. S=514. Board floor before f143946 |
+| 6 | 2026-10-30 | local | 78.7 ms | 30.4 MB | | | VERIFIED-WIN f143946. Per-hour blocks, SIMD scan, writer thread, THP disabled. Est. 66.9 pts. Full-seed sha256 matches. Integrator rechecked the hash |
+
+VERIFIED-WIN: f143946 local T=78.7 RSS=30.4 src=13589
+
+VERIFIED-WIN: 6bddb8a local T=108.8 RSS=23.3 src=15446
