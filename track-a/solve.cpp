@@ -24,15 +24,11 @@ using u64 = uint64_t;
 constexpr int kH = 72;
 constexpr u32 kCap = 2048, kSlots = 4096;
 
-[[noreturn]] void die(const char* m) {
-  fprintf(stderr, "track-a: %s\n", m), exit(1);
-}
+[[noreturn]] void die(const char* m) { fprintf(stderr, "track-a: %s\n", m), exit(1); }
 
 void tune() {
   prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
-  mallopt(M_TRIM_THRESHOLD, 64 * 1024);
-  mallopt(M_MMAP_THRESHOLD, 128 * 1024);
-  mallopt(M_TOP_PAD, 0);
+  mallopt(M_TRIM_THRESHOLD, 64 * 1024), mallopt(M_MMAP_THRESHOLD, 128 * 1024), mallopt(M_TOP_PAD, 0);
 }
 
 int nthreads() {
@@ -42,12 +38,11 @@ int nthreads() {
 }
 
 void drop_pages(const char* base, size_t a, size_t b) {
-  uintptr_t x = ((uintptr_t)(base + a) + 4095) & ~(uintptr_t)4095;
-  uintptr_t y = (uintptr_t)(base + b) & ~(uintptr_t)4095;
+  uintptr_t x = ((uintptr_t)(base + a) + 4095) & ~(uintptr_t)4095, y = (uintptr_t)(base + b) & ~(uintptr_t)4095;
   y > x && madvise((void*)x, y - x, MADV_DONTNEED);
 }
 
-struct B { B* next; u32 n; u32 r[1024]; };
+struct B { B* next; u32 n; u32 r[8192]; };
 
 struct Hour {
   B* head = nullptr;
@@ -56,7 +51,7 @@ struct Hour {
   [[gnu::always_inline]] void add(u32 lat, u32 id, u32 err) {
     u32 p = (err << 11) | id;
     lat < (1u << 19) ? p |= lat << 13 : (p |= 1u << 12, big.push_back(lat), 0);
-    if (!tail || tail->n == 1024) {
+    if (!tail || tail->n == 8192) {
       auto* b = (B*)malloc(sizeof(B));
       !b && (die("oom"), 0);
       b->next = nullptr, b->n = 0, (tail ? tail->next : head) = b, tail = b;
@@ -90,15 +85,13 @@ struct Worker {
 };
 
 [[gnu::always_inline]] inline int hour_of(const char* t) {
-  int mo = t[6] - '0', day = (t[8] - '0') * 10 + (t[9] - '0');
-  int hr = (t[11] - '0') * 10 + (t[12] - '0');
+  int mo = t[6] - '0', day = (t[8] - '0') * 10 + (t[9] - '0'), hr = (t[11] - '0') * 10 + (t[12] - '0');
   return (mo ? day + 1 : day - 30) * 24 + hr - 18;
 }
 
 [[gnu::always_inline]] inline int space_at(u64 v) {
   u64 x = v ^ 0x2020202020202020ull;
-  u64 y = (x - 0x0101010101010101ull) & ~x & 0x8080808080808080ull;
-  return __builtin_ctzll(y) >> 3;
+  return __builtin_ctzll((x - 0x0101010101010101ull) & ~x & 0x8080808080808080ull) >> 3;
 }
 
 [[gnu::always_inline]] inline u64 hash_ep(const char* s, u32 n) {
@@ -111,10 +104,8 @@ struct Worker {
 }
 
 struct Div { u64 m; unsigned s; };
-static constexpr Div kDiv[9] = {
-    {90071993ull, 53}, {112589991ull, 50}, {140737489ull, 47}, {87960931ull, 43},
-    {109951163ull, 40}, {68719477ull, 36}, {42949673ull, 32}, {429496730ull, 32},
-    {4294967296ull, 32}};
+static constexpr Div kDiv[9] = {{90071993ull, 53}, {112589991ull, 50}, {140737489ull, 47},
+    {87960931ull, 43}, {109951163ull, 40}, {68719477ull, 36}, {42949673ull, 32}, {429496730ull, 32}, {4294967296ull, 32}};
 
 [[gnu::always_inline]] inline u32 parse_lat(const char* d, int k, const char* lim) {
   if (k <= 8 && d + 8 <= lim) {
@@ -168,28 +159,33 @@ void parse_slice(Worker& w, const char* base, size_t begin, size_t end, size_t f
   drop_pages(base, dropped, end);
 }
 
-void isort(u32* a, u32 n) {
-  for (u32 i = 1; i < n; ++i) {
-    u32 v = a[i], j = i;
-    while (j && a[j - 1] > v) a[j] = a[j - 1], --j;
-    a[j] = v;
-  }
-}
-
 void select3(u32* a, u32 n, u32& a50, u32& a95, u32& a99) {
   u32 i50 = (u32)((50ull * n + 99) / 100 - 1), i95 = (u32)((95ull * n + 99) / 100 - 1), i99 = (u32)((99ull * n + 99) / 100 - 1);
-  n <= 48 ? isort(a, n) : (std::nth_element(a, a + i99, a + n),
-                          std::nth_element(a, a + i95, a + i99 + 1),
-                          std::nth_element(a, a + i50, a + i95 + 1));
-  a50 = a[i50], a95 = a[i95], a99 = a[i99];
+  if (n <= 64) {
+    for (u32 i = 1; i < n; ++i) {
+      u32 v = a[i], j = i;
+      while (j && a[j - 1] > v) a[j] = a[j - 1], --j;
+      a[j] = v;
+    }
+    a50 = a[i50], a95 = a[i95], a99 = a[i99];
+    return;
+  }
+  static thread_local std::vector<u32> tmp;
+  if (tmp.size() < n) tmp.resize(n);
+  u32 *s = a, *d = tmp.data();
+  for (int sh = 0; sh < 32; sh += 8) {
+    u32 c[256] = {}, p = 0;
+    for (u32 i = 0; i < n; ++i) c[(s[i] >> sh) & 255]++;
+    for (int i = 0; i < 256; ++i) { u32 v = c[i]; c[i] = p; p += v; }
+    for (u32 i = 0; i < n; ++i) d[c[(s[i] >> sh) & 255]++] = s[i];
+    std::swap(s, d);
+  }
+  a50 = s[i50], a95 = s[i95], a99 = s[i99];
 }
 
 [[gnu::always_inline]] inline char* putu(char* o, u32 x) {
-  *o++ = ' ';
-  char t[10];
-  int n = 0;
-  do t[n++] = (char)('0' + x % 10);
-  while (x /= 10);
+  char t[10]; int n = 0; *o++ = ' ';
+  do t[n++] = (char)('0' + x % 10); while (x /= 10);
   while (n--) *o++ = t[n];
   return o;
 }
@@ -270,8 +266,7 @@ int main() {
   std::thread writer([&] {
     for (int h = 0; h < kH; ++h) {
       while (!piece[h].ready.load(std::memory_order_acquire)) _mm_pause();
-      !piece[h].text.empty() &&
-          fwrite(piece[h].text.data(), 1, piece[h].text.size(), fp);
+      !piece[h].text.empty() && fwrite(piece[h].text.data(), 1, piece[h].text.size(), fp);
       std::string().swap(piece[h].text);
     }
   });
