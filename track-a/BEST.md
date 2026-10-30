@@ -12,7 +12,10 @@ The number that must not regress is the board wall time. A later push has to bea
 | 5 | 2026-10-30 | local | 78.7 ms | 30.4 MB | | | per-hour blocks, SIMD scan, writer thread, THP disabled. Median of 4 warm static runs. Formatted lines about 503. Est. points 66.9 vs local 64.4 and board floor 61.89 |
 | 6 | 2026-10-30 | run-01bd0575d976 | 59.9 ms | 33 MB | 69.41 | 23 of 62 | f143946 on the board, commit 07b6200. S=510. Floor this merge has to beat |
 | 7 | 2026-10-30 | local | 65.2 ms | 25.0 MB | | | VERIFIED-WIN 3b2062c. Integrator recheck: hash match, warm 72 ms, HWM 24 MB |
+| 8 | 2026-10-30 | run-3d4300618475 | 44.885 ms | 30,584,832 B | 72.988 | 15 of 64 | 3b2062c on the board, commit 286ddb4. S=492. Points floor this merge has to beat |
+| 9 | 2026-10-30 | local | 65 ms | | | | VERIFIED-WIN 5f407db. Integrator recheck: full-seed sha256 matches, tiny matches, warm 65 ms on this machine (reported 57.1 ms). |
 
+VERIFIED-WIN: 5f407db local T=57.1 RSS=23.0 src=408 lines
 VERIFIED-WIN: 3b2062c local T=65.2 RSS=25.0 src=13575
 
 VERIFIED-WIN: f143946 local T=78.7 RSS=30.4 src=13589

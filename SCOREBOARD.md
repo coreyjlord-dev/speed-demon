@@ -24,4 +24,4 @@ Best-3 geometric mean of points: **64.85** (A, C, B).
 
 Reference anchors: A 32.047 s / 228 MB / S 56, B 56.35 s / 2200 MB / S 91, C 14.44 s / 367 MB / S 108, D 72.69 s / 893 MB / S 43.
 
-Time floors that must not regress: A 44.885 ms (`286ddb4`), B 392.343 ms (`40917bf`), C 74.864 ms (`9710a7a`), D 638.493 ms was the Dial time. D's paged solver is the points best at 678.055 ms and 52.609 points (was 46.167 at 638 ms). A re-run of `9710a7a` left A's and B's bests in place.
+Points floors that must not drop: A 72.988 (`286ddb4`, 44.885 ms), B 60.460 (`40917bf`), C 61.813 (`9710a7a`), D 52.609 (paged solver, 678.055 ms). This push replaces A with `5f407db` and D with `acb4383`. B `1917047` is unchanged.
