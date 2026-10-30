@@ -4,7 +4,7 @@ Group 3.1M request lines by UTC hour and endpoint, then emit count, nearest-rank
 
 ## Approach
 
-The timestamp is a fixed 27-byte field inside one 72-hour window, so the hour is a few digits at fixed offsets, not a calendar parse. The file is mapped once and walked in 1 MB windows (`MADV_POPULATE_READ`, then `MADV_DONTNEED`) so the log does not stay in RSS. Pass one counts each (hour, endpoint) group. Pass two writes each latency into one exact `uint32` slot. Percentiles are nearest-rank at `(p * n + 99) / 100 - 1`. Output is streamed from a 64 KB buffer after those arrays are released.
+The timestamp is a fixed 27-byte field inside one 72-hour window, so the hour is a few digits at fixed offsets, not a calendar parse. One pass files each request into that hour. A 64-byte compare finds the spaces and the newline after the timestamp. When parsing finishes, each hour is counting-sorted by endpoint and the three nearest ranks are taken while that hour is still in cache. A writer thread emits hours in order. Transparent huge pages are disabled and glibc is asked to return freed blocks, so the resident set tracks live records rather than old arenas.
 
 Status is an error exactly when the first digit is `5` (500–599). Duplicate lines both count. Workers equal one per physical core when the run exposes hyperthreads.
 
