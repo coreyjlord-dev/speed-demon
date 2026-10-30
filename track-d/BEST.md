@@ -4,6 +4,7 @@ The number that must not regress is the board wall time. A later push has to bea
 
 VERIFIED-WIN: 5d27373 local T=681 RSS=85 src=541
 VERIFIED-WIN: acb4383 local T=614 RSS=79 src=582
+VERIFIED-WIN: aaf13d1 local T=520 RSS=79 src=318
 
 | # | When (UTC) | Board run | Board T | Board RSS | Points | Rank | Notes |
 |---|---|---|---|---|---|---|---|
@@ -15,3 +16,4 @@ VERIFIED-WIN: acb4383 local T=614 RSS=79 src=582
 | 4 | 2026-10-30 | run-a44861ca7ac0 | 645 ms | 291 MB | 46.01 | 25 of 55 | commit 532829d. Points rank 29 of 55. S=971. This is the floor. Record 126 ms (Cause Of Death, 71.7 pts) |
 | local | 2026-10-30 | | 681 ms | 85 MiB | ~52 est | | VERIFIED-WIN 5d27373. One CSR, BFS order, paged distances. src is approximate formatted code lines. |
 | local | 2026-10-30 | | 614 ms | 79 MiB | ~54 est | | VERIFIED-WIN acb4383. SWAR parse, 512-node blobs, radix heap. Static binary, full seed 1. |
+| local | 2026-10-30 | | 520 ms | 79 MiB | ~57 est | | VERIFIED-WIN aaf13d1. Dial buckets. Static full seed 1, four runs 506–552 ms, median 520. src is folder lines after clang-format. |
