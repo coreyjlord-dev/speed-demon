@@ -12,6 +12,8 @@ The number that must not regress is the board wall time. A later push has to bea
 | 5 | 2026-10-30 | local | 78.7 ms | 30.4 MB | | | per-hour blocks, SIMD scan, writer thread, THP disabled. Median of 4 warm static runs. Formatted lines about 503. Est. points 66.9 vs local 64.4 and board floor 61.89 |
 | 6 | 2026-10-30 | local | 65.2 ms | 25.0 MB | | | Tail scan, masked 64-byte hash, 6-byte records, mallopt trim/mmap, up to 12 threads. Median of 8 warm static runs on 4 cores. Formatted lines about 485. Est. points 69.9 |
 
+VERIFIED-WIN: 3b2062c local T=65.2 RSS=25.0 src=13575
+
 VERIFIED-WIN: f143946 local T=78.7 RSS=30.4 src=13589
 
 VERIFIED-WIN: 6bddb8a local T=108.8 RSS=23.3 src=15446
