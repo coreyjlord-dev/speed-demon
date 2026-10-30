@@ -18,7 +18,7 @@
 
 namespace {
 using u8 = uint8_t; using u32 = uint32_t; using u64 = uint64_t; constexpr auto REL = std::memory_order_relaxed;
-constexpr int kBlob = 512; constexpr u32 kDial = 4096; constexpr u64 kInf = ~0ull;
+constexpr int kBlob = 512; constexpr u32 kDial = 8192; constexpr u64 kInf = ~0ull;
 
 [[noreturn]] void die(const char *m) {
   fprintf(stderr, "track-d: %s\n", m); exit(1);
@@ -297,7 +297,7 @@ int main() {
   int Q = (int)sxs.size(); std::vector<int> ord(Q); for (int i = 0; i < Q; i++) ord[i] = i;
   std::sort(ord.begin(), ord.end(), [&](int a, int b) { return sxs[a] < sxs[b]; });
 
-  int T = threads(); if (T > 4) T = 4; if (T > Q) T = Q; if (T < 1) T = 1; std::vector<int64_t> ans(Q);
+  int T = threads(); if (T > Q) T = Q; if (T < 1) T = 1; std::vector<int64_t> ans(Q);
   std::atomic<int> next{0};
   u32 chunks = (g.n + kBlob - 1) / kBlob;
   run(T, [&](int) {

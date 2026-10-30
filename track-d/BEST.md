@@ -26,3 +26,4 @@ VERIFIED-WIN: acb4383 local T=614 RSS=79 src=582
 | 10 | 2026-10-30 | run-f7d5e71800b6 | 362.082 ms | 89,636,864 B | 61.345 | 17 of 57 | commit 6496adb. Points rank 8 of 57. S=289. |
 | 11 | 2026-10-30 | run-23b521c3b8dc | 355.748 ms | 89,526,272 B | 61.542 | | same binary, re-scored on d3853f9. S=289. Points floor this merge has to beat. |
 | local | 2026-10-30 | | 562 ms | | | | VERIFIED-WIN 42c54bd. Integrator recheck: full-seed sha256 matches, tiny matches. This 4-core VM does not show the 12-thread query cap. |
+| 12 | 2026-10-30 | run-862c09bafae5 | 526.757 ms | 85,336,064 B | 57.488 | | commit e48c45c. S=289. Below the 61.542 floor. Reverted to aaf13d1. |
