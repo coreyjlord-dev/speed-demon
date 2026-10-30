@@ -112,12 +112,12 @@ struct Intern {
   uint32_t mask = 0;
   uint32_t used = 0;
 
-  Intern() {
-    slots.assign(1u << 18, Slot{});
-    mask = (1u << 18) - 1;
-    arena.reserve(1u << 22);
-    span_off.reserve(1u << 17);
-    span_len.reserve(1u << 17);
+  explicit Intern(uint32_t cap = 1u << 18) {
+    slots.assign(cap, Slot{});
+    mask = cap - 1;
+    arena.reserve(1u << 20);
+    span_off.reserve(cap / 2);
+    span_len.reserve(cap / 2);
   }
 
   void rehash(uint32_t cap) {
@@ -518,17 +518,37 @@ int main() {
   }
 
   std::vector<std::vector<uint32_t>> remap(static_cast<size_t>(T));
-  Intern global;
+  for (int t = 0; t < T; t++) remap[t].resize(locals[t].names.used);
+  const int shards_n = T;
+  std::vector<Intern> shards;
+  shards.reserve(static_cast<size_t>(shards_n));
+  for (int s = 0; s < shards_n; s++) shards.emplace_back(1u << 16);
+  pool.clear();
+  for (int s = 0; s < shards_n; s++) {
+    pool.emplace_back([&, s] {
+      for (int t = 0; t < T; t++) {
+        Intern& src = locals[t].names;
+        auto& mp = remap[t];
+        for (uint32_t id = 0; id < src.used; id++) {
+          uint32_t n = 0;
+          const char* str = src.get(id, n);
+          if ((Intern::mix(str, n) % static_cast<uint32_t>(shards_n)) != static_cast<uint32_t>(s))
+            continue;
+          mp[id] = (static_cast<uint32_t>(s) << 20) | shards[s].intern(str, n);
+        }
+      }
+    });
+  }
+  for (auto& th : pool) th.join();
+  std::vector<uint32_t> id_base(static_cast<size_t>(shards_n) + 1);
+  for (int s = 0; s < shards_n; s++) id_base[s + 1] = id_base[s] + shards[s].used;
+  uint32_t global_used = id_base[shards_n];
   for (int t = 0; t < T; t++) {
-    Intern& src = locals[t].names;
-    remap[t].resize(src.used);
-    for (uint32_t id = 0; id < src.used; id++) {
-      uint32_t n = 0;
-      const char* s = src.get(id, n);
-      remap[t][id] = global.intern(s, n);
+    for (uint32_t& g : remap[t]) {
+      g = id_base[g >> 20] + (g & ((1u << 20) - 1));
     }
-    std::vector<Slot>().swap(src.slots);
-    std::string().swap(src.arena);
+    std::vector<Slot>().swap(locals[t].names.slots);
+    std::string().swap(locals[t].names.arena);
   }
   double t_merge = mono();
 
@@ -548,7 +568,7 @@ int main() {
   });
 
   std::atomic<uint32_t> next{0};
-  size_t words = (static_cast<size_t>(global.used) + 63) >> 6;
+  size_t words = (static_cast<size_t>(global_used) + 63) >> 6;
   if (words == 0) words = 1;
   pool.clear();
   for (int t = 0; t < T; t++) {
@@ -618,7 +638,7 @@ int main() {
   if (st) {
     double t1 = mono();
     fprintf(stderr, "parse %.3f merge %.3f bits %.3f rest %.3f total %.3f names %u\n",
-            t_parse - t0, t_merge - t_parse, t_bits - t_merge, t1 - t_bits, t1 - t0, global.used);
+            t_parse - t0, t_merge - t_parse, t_bits - t_merge, t1 - t_bits, t1 - t0, global_used);
   }
   return 0;
 }
