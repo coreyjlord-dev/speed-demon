@@ -12,6 +12,9 @@ The number that must not regress is the board wall time. A later push has to bea
 | 5 | 2026-10-30 | local | 78.7 ms | 30.4 MB | | | per-hour blocks, SIMD scan, writer thread, THP disabled. Median of 4 warm static runs. Formatted lines about 503. Est. points 66.9 vs local 64.4 and board floor 61.89 |
 | 6 | 2026-10-30 | local | 65.2 ms | 25.0 MB | | | Tail scan, masked 64-byte hash, 6-byte records, mallopt trim/mmap, up to 12 threads. Median of 8 warm static runs on 4 cores. Formatted lines about 485. Est. points 69.9 |
 | 7 | 2026-10-30 | local | 57.1 ms | 23.0 MB | | | SWAR method end, CRC of three 8-byte samples, multiply latency, hour text released after write. Median of 8 warm static runs on 4 cores. Formatted lines 408. Est. points 72.2 |
+| 8 | 2026-10-30 | local | 53.5 ms | 22.9 MB | | | Hour workers write in order, latency buffer is not zeroed, insertion sort through 96. Median of 8 warm static runs on 4 cores. Formatted lines 399. Est. points 73.0 |
+
+VERIFIED-WIN: e66eb72 local T=53.5 RSS=22.9 src=11467
 
 VERIFIED-WIN: 5f407db local T=57.1 RSS=23.0 src=11635
 
