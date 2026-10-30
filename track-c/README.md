@@ -4,7 +4,7 @@ Parse the hostile CSV, join `region_id` to a country, and emit one aggregate lin
 
 ## Approach
 
-`regions.csv` is plain. Region ids fit in a direct array of country indexes; a miss, inside the range or past it, is `_UNMATCHED`. `records.csv` is parsed with the spec's quote rules: `""` is one quote, a quoted LF does not end the record, and a BOM is skipped only at a record boundary. Amounts are integer cents. Names are interned as exact unescaped bytes. Each worker appends name ids into a per-country list, then sets bits in that country's bitset only after the list is complete, so the bitset stays in L1. The bitsets are unioned at the end, so the same name in two workers counts once. `name_bytes` and `note_bytes` sum every record, not the distinct set.
+`regions.csv` is plain. Region ids fit in a one-byte array of country indexes; a miss, inside the range or past it, is `_UNMATCHED`. `records.csv` is parsed with the spec's quote rules: `""` is one quote, a quoted LF does not end the record, and a BOM is skipped only at a record boundary. Quotes are found eight bytes at a time. Amounts are integer cents. Each worker interns names into a small arena (the pool is about 100k strings) and appends those ids per country. After the scan, one country at a time is folded into a bitset that fits in L1. A shared intern gives both workers the same id for the same bytes, so the bitsets OR. `name_bytes` and `note_bytes` sum every record, not the distinct set. Pages of the CSV already scanned are dropped.
 
 Workers start on record boundaries. Section 2.2 says an embedded newline in a note is followed by a letter or a quote, never a digit, so a newline followed by an optional BOM and a digit is a real record start. The parser after that point is still quote-aware.
 
@@ -14,4 +14,4 @@ None. Static C++20.
 
 ## With another 24 hours
 
-A SIMD scan for quotes and newlines. Distinct names are already a bitset; the remaining time is touching every CSV byte. The record is 51 ms.
+The scan is still most of the time: about 50 ms locally to touch the CSV, then the intern. The record is 47 ms.
