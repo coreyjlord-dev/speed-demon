@@ -12,3 +12,4 @@ Local numbers are a warm run on this 4-core VM, input already in the page cache.
 | 5 | Tail scan, 64-byte hash, 6-byte records, up to 12 threads, mallopt trim/mmap | local static | 0.065 | 25.0 | |
 | 6 | SWAR method end, CRC of three 8-byte samples, multiply latency, release hour text | local static | 0.057 | 23.0 | |
 | 7 | In-order write from the hour workers, uninitialized latency buffer, insertion sort through 96 | local static | 0.054 | 22.9 | |
+| 8 | Radix sort for latency groups of 512 and up | local static | 0.052 | 22.9 | |

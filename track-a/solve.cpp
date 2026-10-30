@@ -223,11 +223,36 @@ void isort(uint32_t* a, uint32_t n) {
   }
 }
 
+void radix_sort(uint32_t* a, uint32_t n) {
+  static thread_local uint32_t* buf = nullptr;
+  static thread_local uint32_t cap = 0;
+  if (n > cap) {
+    free(buf);
+    cap = n < 16384u ? 16384u : n;
+    buf = (uint32_t*)malloc((size_t)cap * 4);
+  }
+  uint32_t* s = a;
+  uint32_t* d = buf;
+  for (int sh = 0; sh < 32; sh += 8) {
+    uint32_t c[256] = {}, sum = 0;
+    for (uint32_t i = 0; i < n; ++i) c[(s[i] >> sh) & 255]++;
+    for (int i = 0; i < 256; ++i) {
+      uint32_t v = c[i];
+      c[i] = sum;
+      sum += v;
+    }
+    for (uint32_t i = 0; i < n; ++i) d[c[(s[i] >> sh) & 255]++] = s[i];
+    swap(s, d);
+  }
+  if (s != a) memcpy(a, s, (size_t)n * 4);
+}
+
 void select3(uint32_t* a, uint32_t n, uint32_t& a50, uint32_t& a95, uint32_t& a99) {
   uint32_t i50 = (uint32_t)((50ull * n + 99) / 100 - 1);
   uint32_t i95 = (uint32_t)((95ull * n + 99) / 100 - 1);
   uint32_t i99 = (uint32_t)((99ull * n + 99) / 100 - 1);
   if (n <= 96) isort(a, n);
+  else if (n >= 512) radix_sort(a, n);
   else {
     nth_element(a, a + i99, a + n);
     nth_element(a, a + i95, a + i99 + 1);
