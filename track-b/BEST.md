@@ -11,5 +11,7 @@ The number that must not regress is the board wall time. A later push to this tr
 | 4 | 2026-10-30 | | | 0.434 s | Same index and queries. scc 699 lines after clang-format (was 1093). Paired warm cgroup memory.peak 70 MB, same median wall as the previous binary |
 | 5 | 2026-10-30 | | | 0.434 s | Plain bitmap OR (cuts on 64-doc boundaries) and a one-multiply term hash. Paired with row 4 on this box: 462 ms down to 434 ms, memory.peak 70 MB, scc 702 |
 | 6 | 2026-10-30 | | | 0.434 s | Same binary behavior. Source packed under the formatter limit, scc 211 (was 702). Paired wall matched row 5; warm memory.peak 70 MB |
+| 7 | 2026-10-30 | | | | Start-bit token walk. Hashes match row 6. scc 211. Single-thread tokenize 158 ms to 113 ms. Local 12-thread wall is within noise on this 4-core VM. |
 
 VERIFIED-WIN: 688e93de05b51cc0af2670212ccb015d1b3d0de2 local T=434 RSS=70 src=23925
+BOARD-CANDIDATE: c6c556a7e7db00392b4bb1ab35283daed318637e
