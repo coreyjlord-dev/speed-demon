@@ -12,4 +12,4 @@ None. Static C++20.
 
 ## With another 24 hours
 
-The scan is still most of the run, and it is bound by hash lookups of query terms. A tighter term table and a smaller scan record are the next levers. The record on the board is about 0.29 s and 70 MB.
+The scan is still most of the run. Term lookup now hits a 1 MB table and skips a token already recorded in the current document; what is left is the query phase, about 130 ms of a 463 ms local run, and the formatted line count. The record on the board is about 0.29 s and 70 MB.
