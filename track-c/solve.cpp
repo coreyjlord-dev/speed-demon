@@ -125,8 +125,15 @@ struct Intern {
   }
 
   static uint64_t mix(const char* s, uint32_t n) {
-    uint64_t h = 0x9E3779B185EBCA87ull ^ (static_cast<uint64_t>(n) << 1);
-    for (uint32_t i = 0; i < n; i++) {
+    uint64_t h = 0x9E3779B185EBCA87ull ^ (static_cast<uint64_t>(n) * 0xC2B2AE3D27D4EB4Full);
+    uint32_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+      uint32_t v;
+      std::memcpy(&v, s + i, 4);
+      h ^= v;
+      h *= 0x100000001B3ull;
+    }
+    for (; i < n; i++) {
       h ^= static_cast<unsigned char>(s[i]);
       h *= 0x100000001B3ull;
     }
@@ -163,18 +170,26 @@ struct Local {
   std::vector<Agg> ag;
   Intern names;
   std::vector<std::vector<uint64_t>> bits;
+  std::vector<std::vector<uint32_t>> pending;
 
-  explicit Local(size_t countries) : ag(countries), bits(countries) {}
+  explicit Local(size_t countries) : ag(countries), bits(countries), pending(countries) {
+    for (auto& v : pending) v.reserve(4096);
+  }
 
-  void add_name(uint32_t country, uint32_t name_id) {
-    auto& b = bits[country];
-    size_t word = name_id >> 6;
-    if (b.size() <= word) {
-      size_t ns = b.empty() ? 16 : b.size() * 2;
-      if (ns <= word) ns = word + 1;
-      b.resize(ns, 0);
+  void add_name(uint32_t country, uint32_t name_id) { pending[country].push_back(name_id); }
+
+  void finish_names() {
+    for (uint32_t c = 0; c < pending.size(); c++) {
+      auto& v = pending[c];
+      if (v.empty()) continue;
+      uint32_t max_id = 0;
+      for (uint32_t id : v)
+        if (id > max_id) max_id = id;
+      auto& b = bits[c];
+      b.assign((static_cast<size_t>(max_id) >> 6) + 1, 0);
+      for (uint32_t id : v) b[id >> 6] |= 1ull << (id & 63);
+      std::vector<uint32_t>().swap(v);
     }
-    b[word] |= 1ull << (name_id & 63);
   }
 };
 
@@ -471,6 +486,7 @@ int main() {
   for (int t = 0; t < T; t++) {
     pool.emplace_back([&, t] {
       parse_range(starts[t], starts[t + 1], end, world, locals[t]);
+      locals[t].finish_names();
     });
   }
   for (auto& th : pool) th.join();
