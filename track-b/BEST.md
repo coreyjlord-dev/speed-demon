@@ -8,5 +8,6 @@ The number that must not regress is the board wall time. A later push to this tr
 | 1 | 2026-10-30 | pending | | 1.06 s | first submission, 4-core VM, warm cache, RSS 1201 MB |
 | 2 | 2026-10-30 | | | 0.51 s | bitmaps, 16-bit postings, phrases on raw text, anon RSS 63 MB |
 | 3 | 2026-10-30 | | | 0.46 s | 1 MB 32-bit term table, group prefetch, per-document dedupe. Median anon RSS 65 MB. scc 1093 lines after clang-format (was 985) |
+| 4 | 2026-10-30 | | | 0.434 s | Same index and queries. scc 699 lines after clang-format (was 1093). Paired warm cgroup memory.peak 70 MB, same median wall as the previous binary |
 
-VERIFIED-WIN: 00c8f08ffba04156ac714248eac57e7644108e1f local T=463 RSS=65 src=30276
+VERIFIED-WIN: 738ea1da420442d1b22c6ea97fb6c396e0bc4629 local T=434 RSS=70 src=25313
