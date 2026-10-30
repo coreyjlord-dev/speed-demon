@@ -10,3 +10,4 @@ Local numbers are a warm run on this 4-core VM, input already in the page cache.
 | 3 | Two-pass exact uint32 latencies, 1 MB populate/dontneed windows, streamed output | local static | 0.109 | 23.3 | |
 | 4 | One pass, per-hour blocks, in-cache select, SIMD field scan, writer thread, THP off | local static | 0.079 | 30.4 | |
 | 5 | Tail scan, 64-byte hash, 6-byte records, up to 12 threads, mallopt trim/mmap | local static | 0.065 | 25.0 | |
+| 6 | SWAR method end, CRC of three 8-byte samples, multiply latency, release hour text | local static | 0.057 | 23.0 | |
