@@ -9,3 +9,4 @@ Local numbers are a warm run on this 4-core VM, input already in the page cache.
 | 2 | SWAR endpoint scan, CRC32 hash, drop finished pages, raw output buffer | run-c3130c580f05 | 0.075 | 110 | 61.65 |
 | 3 | Two-pass exact uint32 latencies, 1 MB populate/dontneed windows, streamed output | local static | 0.109 | 23.3 | |
 | 4 | One pass, per-hour blocks, in-cache select, SIMD field scan, writer thread, THP off | local static | 0.079 | 30.4 | |
+| 5 | Tail scan, 64-byte hash, 6-byte records, up to 12 threads, mallopt trim/mmap | local static | 0.065 | 25.0 | |
