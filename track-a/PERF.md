@@ -5,4 +5,5 @@ Local numbers are a warm run on this 4-core VM, input already in the page cache.
 | Step | Change | Run ID | T (s) | M (MB) | Points |
 |---|---|---|---|---|---|
 | 0 | The reference, unchanged | | 32.05 | 228 | 0 |
-| 1 | C++: fixed-offset hour, open-addressed endpoints, arena latencies, parallel nth_element | local | 0.129 | 307 | |
+| 1 | C++: fixed-offset hour, open-addressed endpoints, arena latencies, parallel nth_element | run-e7963b19373b | 0.121 | 129 | 56.39 |
+| 2 | SWAR endpoint scan, CRC32 hash, drop finished pages, raw output buffer | local, pending board | 0.087 | 60 | |
