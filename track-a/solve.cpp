@@ -1,6 +1,4 @@
-// Track A: tail scan, per-hour 6-byte records, partial select, in-order write.
-// Equal byte slices match the time-ordered log, so 12 threads on the scorer
-// each own a contiguous run of hours. No extra writer thread.
+// Track A: tail scan, per-hour 6-byte records, in-cache select, writer thread.
 // Nearest rank is (p * n + 99) / 100 - 1. A 5xx is status[0] == '5'.
 
 #include <algorithm>
@@ -21,7 +19,6 @@
 #include <vector>
 
 namespace {
-using namespace std;
 
 constexpr int kH = 72;
 constexpr uint32_t kCap = 2048;
@@ -37,6 +34,7 @@ void tune() {
   mallopt(M_TRIM_THRESHOLD, 64 * 1024);
   mallopt(M_MMAP_THRESHOLD, 128 * 1024);
   mallopt(M_TOP_PAD, 0);
+  mallopt(M_ARENA_MAX, 2);
 }
 
 int nthreads() {
@@ -44,7 +42,7 @@ int nthreads() {
     int n = atoi(e);
     if (n >= 1 && n <= 64) return n;
   }
-  unsigned h = thread::hardware_concurrency();
+  unsigned h = std::thread::hardware_concurrency();
   return h ? (h > 12 ? 12 : (int)h) : 1;
 }
 
@@ -54,11 +52,11 @@ void drop_pages(const char* base, size_t a, size_t b) {
   if (y > x) madvise((void*)x, y - x, MADV_DONTNEED);
 }
 
-struct __attribute__((packed)) Rec {
-  uint32_t lat;
-  uint16_t meta;
+// id 11 bits, error bit, overflow bit, 19-bit latency. Bigger latencies sit in Hour::big.
+struct Rec {
+  uint32_t p;
 };
-static_assert(sizeof(Rec) == 6, "rec");
+static_assert(sizeof(Rec) == 4, "rec");
 
 struct B {
   B* next;
@@ -69,7 +67,14 @@ struct B {
 struct Hour {
   B* head = nullptr;
   B* tail = nullptr;
-  void add(uint32_t lat, uint16_t meta) {
+  std::vector<uint32_t> big;
+  void add(uint32_t lat, uint16_t id, uint32_t err) {
+    uint32_t p = (err << 11) | id;
+    if (lat < (1u << 19)) p |= lat << 13;
+    else {
+      p |= 1u << 12;
+      big.push_back(lat);
+    }
     if (!tail || tail->n == 1024) {
       auto* b = (B*)malloc(sizeof(B));
       if (!b) die("oom");
@@ -78,7 +83,7 @@ struct Hour {
       (tail ? tail->next : head) = b;
       tail = b;
     }
-    tail->r[tail->n++] = Rec{lat, meta};
+    tail->r[tail->n++].p = p;
   }
   void clear() {
     for (B* b = head; b;) {
@@ -87,8 +92,16 @@ struct Hour {
       b = n;
     }
     head = tail = nullptr;
+    big.clear();
   }
 };
+
+inline void unpack(uint32_t p, const uint32_t* big, uint32_t& oi, uint32_t& id, uint32_t& err, uint32_t& lat) {
+  id = p & 2047u;
+  err = (p >> 11) & 1u;
+  if (p & (1u << 12)) lat = big[oi++];
+  else lat = p >> 13;
+}
 
 struct Slot {
   uint64_t h = 0;
@@ -96,7 +109,7 @@ struct Slot {
 };
 
 struct Worker {
-  string bytes;
+  std::string bytes;
   Slot slots[kSlots]{};
   uint32_t nids = 0;
   const char* blob = nullptr;
@@ -178,8 +191,7 @@ inline void take(Worker& w, const char* line, const char* nl, const char* lim) {
   uint32_t elen = (uint32_t)(sp - 4 - ep);
   int kd = (int)(nl - sp - 1);
   uint32_t id = w.intern(ep, elen, hash_ep(ep, elen));
-  uint16_t meta = (uint16_t)(id | ((sp[-3] == '5') << 15));
-  w.hour[hour_of(line)].add(parse_lat(sp + 1, kd, lim), meta);
+  w.hour[hour_of(line)].add(parse_lat(sp + 1, kd, lim), (uint16_t)id, sp[-3] == '5');
 }
 
 void parse_slice(Worker& w, const char* base, size_t begin, size_t end, size_t flen) {
@@ -223,40 +235,15 @@ void isort(uint32_t* a, uint32_t n) {
   }
 }
 
-void radix_sort(uint32_t* a, uint32_t n) {
-  static thread_local uint32_t* buf = nullptr;
-  static thread_local uint32_t cap = 0;
-  if (n > cap) {
-    free(buf);
-    cap = n < 16384u ? 16384u : n;
-    buf = (uint32_t*)malloc((size_t)cap * 4);
-  }
-  uint32_t* s = a;
-  uint32_t* d = buf;
-  for (int sh = 0; sh < 32; sh += 8) {
-    uint32_t c[256] = {}, sum = 0;
-    for (uint32_t i = 0; i < n; ++i) c[(s[i] >> sh) & 255]++;
-    for (int i = 0; i < 256; ++i) {
-      uint32_t v = c[i];
-      c[i] = sum;
-      sum += v;
-    }
-    for (uint32_t i = 0; i < n; ++i) d[c[(s[i] >> sh) & 255]++] = s[i];
-    swap(s, d);
-  }
-  if (s != a) memcpy(a, s, (size_t)n * 4);
-}
-
 void select3(uint32_t* a, uint32_t n, uint32_t& a50, uint32_t& a95, uint32_t& a99) {
   uint32_t i50 = (uint32_t)((50ull * n + 99) / 100 - 1);
   uint32_t i95 = (uint32_t)((95ull * n + 99) / 100 - 1);
   uint32_t i99 = (uint32_t)((99ull * n + 99) / 100 - 1);
-  if (n <= 96) isort(a, n);
-  else if (n >= 512) radix_sort(a, n);
+  if (n <= 48) isort(a, n);
   else {
-    nth_element(a, a + i99, a + n);
-    nth_element(a, a + i95, a + i99 + 1);
-    nth_element(a, a + i50, a + i95 + 1);
+    std::nth_element(a, a + i99, a + n);
+    std::nth_element(a, a + i95, a + i99 + 1);
+    std::nth_element(a, a + i50, a + i95 + 1);
   }
   a50 = a[i50];
   a95 = a[i95];
@@ -273,9 +260,14 @@ inline char* putu(char* o, uint32_t x) {
   return o;
 }
 
+struct Piece {
+  std::string text;
+  std::atomic<int> ready{0};
+};
+
 template <class F>
 void run(int n, F fn) {
-  vector<thread> pool;
+  std::vector<std::thread> pool;
   for (int t = 0; t < n; ++t) pool.emplace_back(fn, t);
   for (auto& th : pool) th.join();
 }
@@ -286,8 +278,8 @@ int main() {
   tune();
   const char* data = getenv("DATA");
   const char* outd = getenv("OUT");
-  string in = string(data && *data ? data : "/data") + "/requests.log";
-  string outp = string(outd && *outd ? outd : "/out") + "/summary.txt";
+  std::string in = std::string(data && *data ? data : "/data") + "/requests.log";
+  std::string outp = std::string(outd && *outd ? outd : "/out") + "/summary.txt";
   int fd = open(in.c_str(), O_RDONLY);
   if (fd < 0) die("open");
   struct stat st {};
@@ -304,7 +296,7 @@ int main() {
   madvise(mapped, flen, MADV_RANDOM);
   const char* file = (const char*)mapped;
   int T = nthreads();
-  vector<size_t> cut(T + 1);
+  std::vector<size_t> cut(T + 1);
   cut[0] = 0;
   cut[T] = flen;
   for (int t = 1; t < T; ++t) {
@@ -313,7 +305,7 @@ int main() {
       while (pos < flen && file[pos - 1] != '\n') ++pos;
     cut[t] = pos;
   }
-  vector<Worker> ws(T);
+  std::vector<Worker> ws(T);
   for (int t = 0; t < T; ++t) ws[t].bytes.reserve(1 << 16);
   run(T, [&](int t) {
     if (cut[t] < cut[t + 1]) parse_slice(ws[t], file, cut[t], cut[t + 1], flen);
@@ -325,17 +317,17 @@ int main() {
     uint32_t n;
     uint16_t tid, lid;
   };
-  vector<Name> names;
+  std::vector<Name> names;
   for (int t = 0; t < T; ++t)
     for (const Slot& sl : ws[t].slots)
       if (sl.h) names.push_back({ws[t].bytes.data() + sl.off, sl.len, (uint16_t)t, (uint16_t)sl.id});
-  sort(names.begin(), names.end(), [](const Name& a, const Name& b) {
+  std::sort(names.begin(), names.end(), [](const Name& a, const Name& b) {
     int c = memcmp(a.s, b.s, a.n < b.n ? a.n : b.n);
     return c ? c < 0 : a.n < b.n;
   });
-  string blob;
+  std::string blob;
   blob.reserve(1 << 16);
-  vector<uint32_t> eoff, elen, rank(T * kCap);
+  std::vector<uint32_t> eoff, elen, rank(T * kCap);
   uint32_t nids = 0;
   for (size_t i = 0; i < names.size(); ++i) {
     bool same = i && names[i].n == names[i - 1].n && !memcmp(names[i].s, names[i - 1].s, names[i].n);
@@ -356,41 +348,55 @@ int main() {
     snprintf(hours[i], 21, "%04d-%02d-%02dT%02d:00:00Z", 2026, month, dom, hr);
   }
 
-  atomic<int> wr{0};
-  atomic<int> next{0};
+  Piece piece[kH];
+  std::thread writer([&] {
+    for (int h = 0; h < kH; ++h) {
+      while (!piece[h].ready.load(std::memory_order_acquire)) _mm_pause();
+      if (!piece[h].text.empty()) fwrite(piece[h].text.data(), 1, piece[h].text.size(), fp);
+      std::string().swap(piece[h].text);
+    }
+  });
+
+  std::atomic<int> next{0};
   int ht = T < kH ? T : kH;
   run(ht, [&](int) {
     for (;;) {
-      int h = next.fetch_add(1, memory_order_relaxed);
+      int h = next.fetch_add(1, std::memory_order_relaxed);
       if (h >= kH) break;
       uint32_t cnt[kCap] = {}, er[kCap] = {}, N = 0;
       for (int w = 0; w < T; ++w)
         for (B* b = ws[w].hour[h].head; b; b = b->next)
           for (uint32_t i = 0; i < b->n; ++i) {
-            uint32_t g = rank[w * kCap + (b->r[i].meta & 0x7fff)];
+            uint32_t p = b->r[i].p;
+            uint32_t g = rank[w * kCap + (p & 2047u)];
             cnt[g]++;
-            er[g] += b->r[i].meta >> 15;
+            er[g] += (p >> 11) & 1u;
             ++N;
           }
-      string text;
+      std::string text;
       if (N) {
         uint32_t pref[kCap], cur[kCap], s = 0;
         for (uint32_t g = 0; g < nids; ++g) {
           pref[g] = cur[g] = s;
           s += cnt[g];
         }
-        uint32_t* lat = (uint32_t*)malloc((size_t)N * 4);
-        if (!lat) die("oom");
-        for (int w = 0; w < T; ++w)
+        std::vector<uint32_t> lat(N);
+        for (int w = 0; w < T; ++w) {
+          uint32_t oi = 0;
+          const uint32_t* big = ws[w].hour[h].big.data();
           for (B* b = ws[w].hour[h].head; b; b = b->next)
-            for (uint32_t i = 0; i < b->n; ++i)
-              lat[cur[rank[w * kCap + (b->r[i].meta & 0x7fff)]]++] = b->r[i].lat;
+            for (uint32_t i = 0; i < b->n; ++i) {
+              uint32_t id, err, lv;
+              unpack(b->r[i].p, big, oi, id, err, lv);
+              lat[cur[rank[w * kCap + id]]++] = lv;
+            }
+        }
         for (int w = 0; w < T; ++w) ws[w].hour[h].clear();
         const char* bp = blob.data();
         for (uint32_t g = 0; g < nids; ++g) {
           if (!cnt[g]) continue;
           uint32_t p50, p95, p99;
-          select3(lat + pref[g], cnt[g], p50, p95, p99);
+          select3(lat.data() + pref[g], cnt[g], p50, p95, p99);
           char line[192];
           char* o = line;
           memcpy(o, hours[h], 20);
@@ -407,15 +413,14 @@ int main() {
           *o++ = '\n';
           text.append(line, (size_t)(o - line));
         }
-        free(lat);
       } else {
         for (int w = 0; w < T; ++w) ws[w].hour[h].clear();
       }
-      while (wr.load(memory_order_acquire) != h) _mm_pause();
-      if (!text.empty()) fwrite(text.data(), 1, text.size(), fp);
-      wr.store(h + 1, memory_order_release);
+      piece[h].text = std::move(text);
+      piece[h].ready.store(1, std::memory_order_release);
     }
   });
+  writer.join();
   fclose(fp);
   malloc_trim(0);
   return 0;
