@@ -6,3 +6,4 @@ Local numbers are a warm run on this 4-core VM. They are not board scores. Peak 
 |---|---|---|---|---|---|
 | 0 | The reference, unchanged | | 72.69 | 893 | 0 |
 | 1 | C++ CSR, bidirectional Dijkstra, radix heap, parallel queries | local | 0.837 | 398 | |
+| 2 | Bidirectional Dial, BFS renumber, parallel radix build | local | 0.518 | 214 | |
