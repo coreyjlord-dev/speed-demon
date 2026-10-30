@@ -34,7 +34,6 @@ void tune() {
   mallopt(M_TRIM_THRESHOLD, 64 * 1024);
   mallopt(M_MMAP_THRESHOLD, 128 * 1024);
   mallopt(M_TOP_PAD, 0);
-  mallopt(M_ARENA_MAX, 2);
 }
 
 int nthreads() {
@@ -52,11 +51,11 @@ void drop_pages(const char* base, size_t a, size_t b) {
   if (y > x) madvise((void*)x, y - x, MADV_DONTNEED);
 }
 
-// id 11 bits, error bit, overflow bit, 19-bit latency. Bigger latencies sit in Hour::big.
-struct Rec {
-  uint32_t p;
+struct __attribute__((packed)) Rec {
+  uint32_t lat;
+  uint16_t meta;
 };
-static_assert(sizeof(Rec) == 4, "rec");
+static_assert(sizeof(Rec) == 6, "rec");
 
 struct B {
   B* next;
@@ -67,14 +66,7 @@ struct B {
 struct Hour {
   B* head = nullptr;
   B* tail = nullptr;
-  std::vector<uint32_t> big;
-  void add(uint32_t lat, uint16_t id, uint32_t err) {
-    uint32_t p = (err << 11) | id;
-    if (lat < (1u << 19)) p |= lat << 13;
-    else {
-      p |= 1u << 12;
-      big.push_back(lat);
-    }
+  void add(uint32_t lat, uint16_t meta) {
     if (!tail || tail->n == 1024) {
       auto* b = (B*)malloc(sizeof(B));
       if (!b) die("oom");
@@ -83,7 +75,7 @@ struct Hour {
       (tail ? tail->next : head) = b;
       tail = b;
     }
-    tail->r[tail->n++].p = p;
+    tail->r[tail->n++] = Rec{lat, meta};
   }
   void clear() {
     for (B* b = head; b;) {
@@ -92,16 +84,8 @@ struct Hour {
       b = n;
     }
     head = tail = nullptr;
-    big.clear();
   }
 };
-
-inline void unpack(uint32_t p, const uint32_t* big, uint32_t& oi, uint32_t& id, uint32_t& err, uint32_t& lat) {
-  id = p & 2047u;
-  err = (p >> 11) & 1u;
-  if (p & (1u << 12)) lat = big[oi++];
-  else lat = p >> 13;
-}
 
 struct Slot {
   uint64_t h = 0;
@@ -191,7 +175,8 @@ inline void take(Worker& w, const char* line, const char* nl, const char* lim) {
   uint32_t elen = (uint32_t)(sp - 4 - ep);
   int kd = (int)(nl - sp - 1);
   uint32_t id = w.intern(ep, elen, hash_ep(ep, elen));
-  w.hour[hour_of(line)].add(parse_lat(sp + 1, kd, lim), (uint16_t)id, sp[-3] == '5');
+  uint16_t meta = (uint16_t)(id | ((sp[-3] == '5') << 15));
+  w.hour[hour_of(line)].add(parse_lat(sp + 1, kd, lim), meta);
 }
 
 void parse_slice(Worker& w, const char* base, size_t begin, size_t end, size_t flen) {
@@ -367,10 +352,9 @@ int main() {
       for (int w = 0; w < T; ++w)
         for (B* b = ws[w].hour[h].head; b; b = b->next)
           for (uint32_t i = 0; i < b->n; ++i) {
-            uint32_t p = b->r[i].p;
-            uint32_t g = rank[w * kCap + (p & 2047u)];
+            uint32_t g = rank[w * kCap + (b->r[i].meta & 0x7fff)];
             cnt[g]++;
-            er[g] += (p >> 11) & 1u;
+            er[g] += b->r[i].meta >> 15;
             ++N;
           }
       std::string text;
@@ -381,16 +365,10 @@ int main() {
           s += cnt[g];
         }
         std::vector<uint32_t> lat(N);
-        for (int w = 0; w < T; ++w) {
-          uint32_t oi = 0;
-          const uint32_t* big = ws[w].hour[h].big.data();
+        for (int w = 0; w < T; ++w)
           for (B* b = ws[w].hour[h].head; b; b = b->next)
-            for (uint32_t i = 0; i < b->n; ++i) {
-              uint32_t id, err, lv;
-              unpack(b->r[i].p, big, oi, id, err, lv);
-              lat[cur[rank[w * kCap + id]]++] = lv;
-            }
-        }
+            for (uint32_t i = 0; i < b->n; ++i)
+              lat[cur[rank[w * kCap + (b->r[i].meta & 0x7fff)]]++] = b->r[i].lat;
         for (int w = 0; w < T; ++w) ws[w].hour[h].clear();
         const char* bp = blob.data();
         for (uint32_t g = 0; g < nids; ++g) {

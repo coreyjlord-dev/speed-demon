@@ -19,6 +19,7 @@ The number that must not regress is the board wall time. A later push has to bea
 | 12 | 2026-10-30 | local | 60 ms | | | | VERIFIED-WIN e66eb72. Integrator recheck: full-seed sha256 matches, tiny matches, warm 60 ms (reported 53.5 ms). |
 | 13 | 2026-10-30 | run-f0779c67f52f | 70.601 ms | 32,645,120 B | 68.413 | | commit 6496adb. S=406. Below the 74.272 floor. Reverted to 5f407db. |
 | 14 | 2026-10-30 | local | 67 ms | | | | VERIFIED-WIN 59410ea. Integrator recheck: full-seed sha256 matches, tiny matches, warm 67 ms on this machine (reported 58.4 ms / 17.5 MB). |
+| 15 | 2026-10-30 | run-e57846948043 | 42.967 ms | 30,912,512 B | 73.787 | | commit 95aaca0. S=439. Below the 74.272 floor. Reverted to 5f407db. |
 
 VERIFIED-WIN: 59410ea local T=58.4 RSS=17.5 src=432 lines
 VERIFIED-WIN: e66eb72 local T=53.5 RSS=22.9 src=399 lines

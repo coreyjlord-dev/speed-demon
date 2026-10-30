@@ -3,6 +3,7 @@
 The number that must not regress is the board wall time. A later push has to beat the best board T in this table.
 
 VERIFIED-WIN: 5d27373 local T=681 RSS=85 src=541
+VERIFIED-WIN: 42c54bd local T=508 RSS=80 src=318
 VERIFIED-WIN: aaf13d1 local T=520 RSS=79 src=318
 VERIFIED-WIN: acb4383 local T=614 RSS=79 src=582
 
@@ -22,3 +23,6 @@ VERIFIED-WIN: acb4383 local T=614 RSS=79 src=582
 | 8 | 2026-10-30 | run-b062dc46fc08 | 413.966 ms | 85,639,168 B | 57.993 | 22 of 57 | commit 080012c. Points rank 19 of 57. S=550. |
 | 9 | 2026-10-30 | run-0c8ab4d70dac | 403.530 ms | 85,532,672 B | 58.275 | | same binary, re-scored on a5f4152. S=550. Points floor this merge has to beat. |
 | local | 2026-10-30 | | 524 ms | | | | VERIFIED-WIN aaf13d1. Integrator recheck: full-seed sha256 matches, tiny matches, warm 0.524 s (reported 520 ms). |
+| 10 | 2026-10-30 | run-f7d5e71800b6 | 362.082 ms | 89,636,864 B | 61.345 | 17 of 57 | commit 6496adb. Points rank 8 of 57. S=289. |
+| 11 | 2026-10-30 | run-23b521c3b8dc | 355.748 ms | 89,526,272 B | 61.542 | | same binary, re-scored on d3853f9. S=289. Points floor this merge has to beat. |
+| local | 2026-10-30 | | 562 ms | | | | VERIFIED-WIN 42c54bd. Integrator recheck: full-seed sha256 matches, tiny matches. This 4-core VM does not show the 12-thread query cap. |

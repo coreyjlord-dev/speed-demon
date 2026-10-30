@@ -6,4 +6,4 @@
 | 4 | Scored Dial, both directions | run-a44861ca7ac0 | 0.645 | 291 | 46.01 |
 | 5 | One CSR, BFS order, paged distances | local | 0.681 | 85 | ~52 est |
 | 6 | SWAR parse, 512-node blobs, radix heap | local | 0.614 | 79 | ~54 est |
-| 7 | Dial buckets, same pages and blobs | local | 0.520 | 79 | ~58 est |
+| 7 | Dial width 4096, queries capped at 4 | local | 0.508 | 80 | ~57.6 est |
