@@ -16,3 +16,4 @@ Local numbers are a warm run on this 4-core VM, input already in the page cache.
 | 9 | Back on 5f407db. 4-byte packed records, overflow list for large latencies, malloc arenas capped at 2 | local static | 0.058 | 17.5 | |
 | 10 | Board rejected step 9 (42.967 ms / 30.9 MB / 73.79). 5f407db re-scored 41.140 ms / 31.0 MB / 74.435. Solver is step 6 again | board | 0.043 | 30.9 | 73.79 |
 | 11 | Same step-6 binary behavior, source cut to 287 formatted scc lines | local static | 0.060 | 23 | |
+| 12 | 4-byte hour records, large latencies in a side list, arenas uncapped, 287 lines | local static | 0.059 | 18 | |

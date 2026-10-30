@@ -37,9 +37,8 @@ void tune() {
 
 int nthreads() {
   const char* e = getenv("SD_THREADS");
-  int n = e ? atoi(e) : 0;
-  unsigned h = std::thread::hardware_concurrency();
-  return n >= 1 && n <= 64 ? n : !h ? 1 : h > 12 ? 12 : (int)h;
+  int n = e ? atoi(e) : 0, h = std::thread::hardware_concurrency();
+  return n >= 1 && n <= 64 ? n : !h ? 1 : h > 12 ? 12 : h;
 }
 
 void drop_pages(const char* base, size_t a, size_t b) {
@@ -48,23 +47,25 @@ void drop_pages(const char* base, size_t a, size_t b) {
   y > x && madvise((void*)x, y - x, MADV_DONTNEED);
 }
 
-struct __attribute__((packed)) Rec { u32 lat; uint16_t meta; };
-struct B { B* next; u32 n; Rec r[1024]; };
+struct B { B* next; u32 n; u32 r[1024]; };
 
 struct Hour {
   B* head = nullptr;
   B* tail = nullptr;
-  [[gnu::always_inline]] void add(u32 lat, uint16_t meta) {
+  std::vector<u32> big;
+  [[gnu::always_inline]] void add(u32 lat, u32 id, u32 err) {
+    u32 p = (err << 11) | id;
+    lat < (1u << 19) ? p |= lat << 13 : (p |= 1u << 12, big.push_back(lat), 0);
     if (!tail || tail->n == 1024) {
       auto* b = (B*)malloc(sizeof(B));
       !b && (die("oom"), 0);
       b->next = nullptr, b->n = 0, (tail ? tail->next : head) = b, tail = b;
     }
-    tail->r[tail->n++] = Rec{lat, meta};
+    tail->r[tail->n++] = p;
   }
   void clear() {
     for (B *p = head, *n; p; p = n) n = p->next, free(p);
-    head = tail = nullptr;
+    head = tail = nullptr, big.clear();
   }
 };
 
@@ -140,8 +141,7 @@ static constexpr Div kDiv[9] = {
   u32 elen = (u32)(sp - 4 - ep), id;
   int kd = (int)(nl - sp - 1);
   id = w.intern(ep, elen, hash_ep(ep, elen));
-  w.hour[hour_of(line)].add(parse_lat(sp + 1, kd, lim),
-                            (uint16_t)(id | ((sp[-3] == '5') << 15)));
+  w.hour[hour_of(line)].add(parse_lat(sp + 1, kd, lim), id, sp[-3] == '5');
 }
 
 void parse_slice(Worker& w, const char* base, size_t begin, size_t end, size_t flen) {
@@ -177,9 +177,7 @@ void isort(u32* a, u32 n) {
 }
 
 void select3(u32* a, u32 n, u32& a50, u32& a95, u32& a99) {
-  u32 i50 = (u32)((50ull * n + 99) / 100 - 1);
-  u32 i95 = (u32)((95ull * n + 99) / 100 - 1);
-  u32 i99 = (u32)((99ull * n + 99) / 100 - 1);
+  u32 i50 = (u32)((50ull * n + 99) / 100 - 1), i95 = (u32)((95ull * n + 99) / 100 - 1), i99 = (u32)((99ull * n + 99) / 100 - 1);
   n <= 48 ? isort(a, n) : (std::nth_element(a, a + i99, a + n),
                           std::nth_element(a, a + i95, a + i99 + 1),
                           std::nth_element(a, a + i50, a + i95 + 1));
@@ -286,17 +284,19 @@ int main() {
       for (int w = 0; w < T; ++w)
         for (B* b = ws[w].hour[h].head; b; b = b->next)
           for (u32 i = 0; i < b->n; ++i)
-            g = rank[w * kCap + (b->r[i].meta & 0x7fff)], cnt[g]++,
-            er[g] += b->r[i].meta >> 15, ++N;
+            g = rank[w * kCap + (b->r[i] & 2047)], cnt[g]++,
+            er[g] += (b->r[i] >> 11) & 1, ++N;
       std::string text;
       if (N) {
         u32 pref[kCap], cur[kCap], s = 0;
         for (u32 g = 0; g < nids; ++g) pref[g] = cur[g] = s, s += cnt[g];
         std::vector<u32> lat(N);
-        for (int w = 0; w < T; ++w)
+        for (int w = 0; w < T; ++w) {
+          u32 oi = 0;
           for (B* b = ws[w].hour[h].head; b; b = b->next)
-            for (u32 i = 0; i < b->n; ++i)
-              lat[cur[rank[w * kCap + (b->r[i].meta & 0x7fff)]]++] = b->r[i].lat;
+            for (u32 i = 0, p; i < b->n; ++i)
+              p = b->r[i], lat[cur[rank[w * kCap + (p & 2047)]]++] = (p & 4096) ? ws[w].hour[h].big[oi++] : p >> 13;
+        }
         const char* bp = blob.data();
         for (u32 g = 0; g < nids; ++g) if (cnt[g]) {
           u32 p50, p95, p99;
