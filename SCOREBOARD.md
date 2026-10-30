@@ -24,4 +24,4 @@ Best-3 geometric mean of points: **65.68** (A, B, D).
 
 Reference anchors: A 32.047 s / 228 MB / S 56, B 56.35 s / 2200 MB / S 91, C 14.44 s / 367 MB / S 108, D 72.69 s / 893 MB / S 43.
 
-Points floors that must not drop: A 74.272 (`a5f4152`, 41.141 ms, S=415), B 61.834 (`6496adb`, 338.400 ms, S=1090), C 61.813 (`9710a7a`), D 61.345 (`6496adb`, 362.082 ms, S=289). `e66eb72` scored 70.601 ms and 68.413 points, so Track A is reverted to `5f407db`. B `00c8f08` and D `aaf13d1` stay.
+Points floors that must not drop: A 74.272 (`a5f4152`, 41.141 ms, S=415), B 61.834 (`6496adb`, 338.400 ms, S=1090), C 61.813 (`9710a7a`), D 61.345 (`6496adb`, 362.082 ms, S=289). This push replaces A with `59410ea`. Revert A if the board points fall below 74.272.
