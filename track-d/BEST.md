@@ -5,4 +5,4 @@ The number that must not regress is the board wall time. A later push has to bea
 | # | When (UTC) | Board run | Board T | Board RSS | Points | Rank | Notes |
 |---|---|---|---|---|---|---|---|
 | 0 | | | 72.69 s | 893 MB | 0 | | reference on the scoring box |
-| 1 | 2026-10-30 | run-a333d6934b1f | 860 ms | 663 MB | 42.35 | 25 of 51 | commit a83c542. Points rank 31 of 51. Later re-runs were 864 ms and 873 ms, so 860 ms stays the floor. Record 155 ms (Cause Of Death, 70.19 pts) |
+| 1 | 2026-10-30 | run-a333d6934b1f | 860 ms | 663 MB | 42.35 | 27 of 52 | commit a83c542. Points rank 32 of 52. Later re-runs were 864 ms and 874 ms, so 860 ms stays the floor. Record 155 ms (Cause Of Death, 70.19 pts) |
