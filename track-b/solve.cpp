@@ -31,6 +31,8 @@ using u64 = uint64_t;
 constexpr u32 kNone = 0xffffffffu;
 constexpr int kMaxTerm = 32;
 constexpr int kLag = 8;
+constexpr u32 kIdBits = 18;
+constexpr u32 kIdMask = (1u << kIdBits) - 1u;
 constexpr u32 kTermBits = 8;
 constexpr u32 kDocBits = 16;
 constexpr u32 kBucket = 1u << kTermBits;
@@ -73,92 +75,181 @@ struct FileMap {
   }
 };
 
-struct Key {
-  u64 w[4]{};
+// Fold a token with one or two word loads at the moment the tokenizer emits it.
+// Bytes past n are masked off. The file map has a guard page, so the loads stay in range.
+inline void words_of(const uint8_t* s, u32 n, u64& w0, u64& w1) {
+  u64 a = 0;
+  std::memcpy(&a, s, 8);
+  a |= 0x2020202020202020ull;
+  if (n <= 8) {
+    if (n < 8) a &= (1ull << (8 * n)) - 1;
+    w0 = a;
+    w1 = 0;
+    return;
+  }
+  u64 b = 0;
+  std::memcpy(&b, s + 8, 8);
+  b |= 0x2020202020202020ull;
+  if (n < 16) b &= (1ull << (8 * (n - 8))) - 1;
+  w0 = a;
+  w1 = b;
+}
+
+inline u64 mix_tok(u64 w0, u64 w1, u32 n) {
+  u64 h = w0 + 0x9E3779B185EBCA87ull;
+  h ^= w1 + (static_cast<u64>(n) << 1);
+  h *= 0xC2B2AE3D27D4EB4Full;
+  h ^= h >> 33;
+  h *= 0x165667B19E3779F9ull;
+  return h;
+}
+
+inline bool tail_eq(const uint8_t* a, const uint8_t* s, u32 n) {
+  for (u32 i = 16; i < n; i++)
+    if (a[i] != (s[i] | 0x20u)) return false;
+  return true;
+}
+
+inline bool tail_eq_raw(const uint8_t* a, const uint8_t* s, u32 n) {
+  for (u32 i = 16; i < n; i++)
+    if ((a[i] | 0x20u) != (s[i] | 0x20u)) return false;
+  return true;
+}
+
+struct Rec {
+  u64 w0 = 0, w1 = 0;
+  u32 off = 0;
+  uint8_t n = 0;
 };
 
-u64 hash_key(const Key& k) {
-  u64 h = (k.w[0] ^ k.w[1] * 0x9E3779B185EBCA87ull) * 0xC2B2AE3D27D4EB4Full;
-  h ^= (k.w[2] + k.w[3] * 0x165667B19E3779F9ull);
-  h *= 0x100000001B3ull;
-  return h ^ (h >> 32);
-}
-
-bool same_key(const Key& a, const Key& b) {
-  return ((a.w[0] ^ b.w[0]) | (a.w[1] ^ b.w[1]) | (a.w[2] ^ b.w[2]) | (a.w[3] ^ b.w[3])) == 0;
-}
-
-Key make_key(const uint8_t* s, u32 n) {
-  Key k;
-  for (int i = 0; i < 4; i++) {
-    u32 off = static_cast<u32>(i * 8);
-    if (off >= n) break;
-    u32 take = std::min(8u, n - off);
-    u64 w = 0;
-    std::memcpy(&w, s + off, take);
-    u64 mask = take == 8 ? ~0ull : ((1ull << (8 * take)) - 1);
-    k.w[i] = (w | 0x2020202020202020ull) & mask;
-  }
-  return k;
-}
-
+// 32-bit slots, sized for L2. Low 18 bits are id+1, high 14 are a tag.
+// Load stays under one half, so the home slot is the common case.
 struct Terms {
-  std::vector<u64> slot;
-  std::vector<Key> keys;
-  std::vector<uint8_t> len;
+  static constexpr size_t kCap = 1u << 18;
+  std::vector<u32> slot;
+  std::vector<Rec> rec;
+  std::vector<char> text;
   size_t mask = 0;
 
-  u32 size() const { return static_cast<u32>(keys.size()); }
-  const uint8_t* bytes(u32 id) const { return reinterpret_cast<const uint8_t*>(keys[id].w); }
+  u32 size() const { return static_cast<u32>(rec.size()); }
+  const uint8_t* bytes(u32 id) const { return reinterpret_cast<const uint8_t*>(text.data() + rec[id].off); }
+
+  static u32 tag_of(u64 h) { return static_cast<u32>(h >> 50); }
+  static u32 pack(u32 tag, u32 id) { return (tag << kIdBits) | (id + 1u); }
 
   void rehash(size_t cap) {
     slot.assign(cap, 0);
     mask = cap - 1;
-    for (u32 id = 0; id < keys.size(); id++) {
-      u64 h = hash_key(keys[id]);
-      size_t i = h & mask;
-      while (slot[i]) i = (i + 1) & mask;
-      slot[i] = (h & 0xFFFFFFFF00000000ull) | (static_cast<u64>(id) + 1);
+    for (u32 id = 0; id < rec.size(); id++) insert_slot(id);
+  }
+
+  void grow() {
+    if (rec.size() >= kIdMask) die("term id");
+    if (!slot.empty() && (rec.size() + 1) * 2 <= slot.size()) return;
+    rehash(slot.empty() ? kCap : slot.size() * 2);
+  }
+
+  void insert_slot(u32 id) {
+    u64 h = mix_tok(rec[id].w0, rec[id].w1, rec[id].n);
+    u32 tag = tag_of(h);
+    for (size_t i = h & mask;; i = (i + 1) & mask) {
+      if (!slot[i]) {
+        slot[i] = pack(tag, id);
+        return;
+      }
     }
   }
 
-  u32 add(const Key& k) {
-    if ((keys.size() + 1) * 2 > slot.size()) rehash(std::max<size_t>(slot.size() * 2, 1024));
-    u64 h = hash_key(k);
+  bool eq_at(u32 id, u64 w0, u64 w1, u32 n, const uint8_t* s) const {
+    const Rec& r = rec[id];
+    if (r.n != n || r.w0 != w0 || (n > 8 && r.w1 != w1)) return false;
+    return n <= 16 || tail_eq(reinterpret_cast<const uint8_t*>(text.data() + r.off), s, n);
+  }
+
+  u32 add(const uint8_t* s, u32 n) {
+    grow();
+    u64 w0, w1;
+    words_of(s, n, w0, w1);
+    u64 h = mix_tok(w0, w1, n);
+    u32 tag = tag_of(h);
     for (size_t i = h & mask;; i = (i + 1) & mask) {
-      u64 s = slot[i];
-      if (!s) {
-        keys.push_back(k);
-        len.push_back(static_cast<uint8_t>(::strnlen(reinterpret_cast<const char*>(k.w), kMaxTerm)));
-        slot[i] = (h & 0xFFFFFFFF00000000ull) | keys.size();
-        return static_cast<u32>(keys.size() - 1);
+      u32 sl = slot[i];
+      if (!sl) {
+        Rec r;
+        r.w0 = w0;
+        r.w1 = w1;
+        r.n = static_cast<uint8_t>(n);
+        r.off = static_cast<u32>(text.size());
+        text.resize(text.size() + n);
+        for (u32 k = 0; k < n; k++) text[r.off + k] = static_cast<char>(s[k] | 0x20u);
+        rec.push_back(r);
+        slot[i] = pack(tag, static_cast<u32>(rec.size() - 1));
+        return static_cast<u32>(rec.size() - 1);
       }
-      if ((s >> 32) == (h >> 32) && same_key(keys[static_cast<u32>(s) - 1], k))
-        return static_cast<u32>(s) - 1;
+      if ((sl >> kIdBits) == tag && eq_at((sl & kIdMask) - 1u, w0, w1, n, s))
+        return (sl & kIdMask) - 1u;
     }
   }
 
   void renumber(const std::vector<u32>& neu) {
-    std::vector<Key> nk(keys.size());
-    std::vector<uint8_t> nl(len.size());
-    for (u32 i = 0; i < keys.size(); i++) {
-      nk[neu[i]] = keys[i];
-      nl[neu[i]] = len[i];
-    }
-    keys.swap(nk);
-    len.swap(nl);
-    rehash(slot.size());
+    std::vector<Rec> nr(rec.size());
+    for (u32 i = 0; i < rec.size(); i++) nr[neu[i]] = rec[i];
+    rec.swap(nr);
+    rehash(std::max(slot.size(), kCap));
   }
 
   void prefetch(u64 h) const { _mm_prefetch(reinterpret_cast<const char*>(&slot[h & mask]), _MM_HINT_T0); }
 
-  u32 find(const Key& k, u64 h) const {
+  // Home slot first. The table stays under half full, so this returns immediately
+  // for a miss and for most hits.
+  u32 find_fast(u64 w0, u64 w1, u32 n, u64 h, const uint8_t* s) const {
+    u32 tag = tag_of(h);
     for (size_t i = h & mask;; i = (i + 1) & mask) {
-      u64 s = slot[i];
-      if (!s) return kNone;
-      if ((s >> 32) == (h >> 32) && same_key(keys[static_cast<u32>(s) - 1], k))
-        return static_cast<u32>(s) - 1;
+      u32 sl = slot[i];
+      if (!sl) return kNone;
+      if ((sl >> kIdBits) == tag && eq_at((sl & kIdMask) - 1u, w0, w1, n, s))
+        return (sl & kIdMask) - 1u;
     }
+  }
+};
+
+// Distinct tokens in the current document. A repeat skips the term-table probe.
+// 4096 covers a generated document (measured maximum is under 800 distinct tokens).
+struct DocSeen {
+  struct E {
+    u64 w0 = 0, w1 = 0;
+    const uint8_t* s = nullptr;
+    u32 n = 0, gen = 0;
+  };
+  static constexpr u32 kM = 4096;
+  E tab[kM];
+  u32 gen = 1;
+
+  void next() {
+    if (++gen == 0) {
+      std::memset(tab, 0, sizeof tab);
+      gen = 1;
+    }
+  }
+
+  bool claim(u64 h, u64 w0, u64 w1, u32 n, const uint8_t* s) {
+    u32 i = static_cast<u32>(h) & (kM - 1);
+    for (u32 k = 0; k < kM; k++) {
+      E& e = tab[i];
+      if (e.gen != gen) {
+        e.w0 = w0;
+        e.w1 = w1;
+        e.n = n;
+        e.s = s;
+        e.gen = gen;
+        return true;
+      }
+      if (e.w0 == w0 && e.n == n && (n <= 8 || e.w1 == w1) &&
+          (n <= 16 || tail_eq_raw(e.s, s, n)))
+        return false;
+      i = (i + 1) & (kM - 1);
+    }
+    die("doc table");
   }
 };
 
@@ -174,19 +265,36 @@ inline u32 token_mask32(const uint8_t* p) {
 }
 
 template <class F>
-void for_tokens(const uint8_t* q, const uint8_t* e, const Terms& terms, F&& emit) {
-  Key keys[kLag];
-  u64 hs[kLag];
-  int n = 0;
+void for_tokens(const uint8_t* q, const uint8_t* e, const Terms& terms, DocSeen& seen, F&& emit) {
+  struct P {
+    const uint8_t* s;
+    u32 n;
+    u64 w0, w1, h;
+  };
+  // Two groups. Filling one hides the prefetches issued for the other.
+  P buf[2][kLag];
+  int cur = 0, cn = 0, prev = -1, pn = 0;
+  auto probe = [&](int g, int n) {
+    for (int i = 0; i < n; i++) {
+      const P& t = buf[g][i];
+      emit(terms.find_fast(t.w0, t.w1, t.n, t.h, t.s));
+    }
+  };
   auto push = [&](const uint8_t* s, u32 len) {
     if (len == 0 || len > kMaxTerm) return;
-    Key k = make_key(s, len);
-    u64 h = hash_key(k);
-    terms.prefetch(h);
-    if (n >= kLag) emit(terms.find(keys[n % kLag], hs[n % kLag]));
-    keys[n % kLag] = k;
-    hs[n % kLag] = h;
-    n++;
+    u64 w0, w1;
+    words_of(s, len, w0, w1);
+    u64 h = mix_tok(w0, w1, len);
+    if (!seen.claim(h, w0, w1, len, s)) return;
+    if (cn == kLag) {
+      for (int i = 0; i < cn; i++) terms.prefetch(buf[cur][i].h);
+      if (prev >= 0) probe(prev, pn);
+      prev = cur;
+      pn = cn;
+      cur ^= 1;
+      cn = 0;
+    }
+    buf[cur][cn++] = P{s, len, w0, w1, h};
   };
   const uint8_t* tok = nullptr;
   auto flush = [&](const uint8_t* end) {
@@ -242,7 +350,10 @@ void for_tokens(const uint8_t* q, const uint8_t* e, const Terms& terms, F&& emit
     ++p;
   }
   flush(e);
-  for (int i = n > kLag ? n - kLag : 0; i < n; i++) emit(terms.find(keys[i % kLag], hs[i % kLag]));
+  if (cn)
+    for (int i = 0; i < cn; i++) terms.prefetch(buf[cur][i].h);
+  if (prev >= 0) probe(prev, pn);
+  if (cn) probe(cur, cn);
 }
 
 struct BlockLog {
@@ -349,17 +460,16 @@ Index build(const FileMap& file, Terms& terms, std::vector<u32>& qterms, int T) 
       ix.origin[t] = first;
       auto& cnt = count[t];
       cnt.assign(nterms, 0);
-      std::vector<u32> seen_doc(nterms, kNone);
+      DocSeen doc_seen;
       const uint8_t* stop = begin + (end - begin) / 32;
       u32 doc = first;
       for (const uint8_t* p = begin; p < stop && p < end;) {
         const uint8_t* nl = static_cast<const uint8_t*>(std::memchr(p, '\n', end - p));
         const uint8_t* tab = static_cast<const uint8_t*>(std::memchr(p, '\t', nl - p));
-        for_tokens(tab + 1, nl, terms, [&](u32 id) {
-          if (id != kNone && seen_doc[id] != doc) {
-            seen_doc[id] = doc;
-            cnt[id]++;
-          }
+        doc_seen.next();
+        for_tokens(tab + 1, nl, terms, doc_seen, [&](u32 id) {
+          if (id >= nterms) return;
+          cnt[id]++;
         });
         p = nl + 1;
         doc++;
@@ -398,7 +508,7 @@ Index build(const FileMap& file, Terms& terms, std::vector<u32>& qterms, int T) 
       const uint8_t* end = base + cut[t + 1];
       u32 first = ix.origin[t];
       auto& cnt = count[t];
-      std::vector<u32> seen_doc(nterms, kNone);
+      DocSeen doc_seen;
       auto& out = logs[t];
       out.resize(nbuckets);
       u32 doc = first;
@@ -409,9 +519,9 @@ Index build(const FileMap& file, Terms& terms, std::vector<u32>& qterms, int T) 
         const uint8_t* tx = tab + 1;
         ix.text[2 * doc] = static_cast<u32>(tx - base);
         ix.text[2 * doc + 1] = static_cast<u32>(nl - base);
-        for_tokens(tx, nl, terms, [&](u32 id) {
-          if (id == kNone || seen_doc[id] == doc) return;
-          seen_doc[id] = doc;
+        doc_seen.next();
+        for_tokens(tx, nl, terms, doc_seen, [&](u32 id) {
+          if (id >= nterms) return;
           if (u32 d = ix.dense[id]; d != kNone) {
             __atomic_or_fetch(&ix.bits[static_cast<size_t>(d) * ix.words + (doc >> 6)],
                               1ull << (doc & 63), __ATOMIC_RELAXED);
@@ -647,7 +757,7 @@ struct Engine {
   }
 
   bool token_is(const uint8_t* p, size_t n, u32 id) const {
-    if (n != terms->len[id]) return false;
+    if (n != terms->rec[id].n) return false;
     const uint8_t* k = terms->bytes(id);
     for (size_t i = 0; i < n; i++)
       if ((p[i] | 0x20) != k[i]) return false;
@@ -794,13 +904,14 @@ const char* env_or(const char* k, const char* fb) {
 int main() {
   prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
   mallopt(M_MMAP_THRESHOLD, 1 << 16);
+  mallopt(M_TRIM_THRESHOLD, 1 << 16);
+  mallopt(M_TOP_PAD, 0);
   std::string dir = env_or("DATA", "/data");
   std::string out_path = std::string(env_or("OUT", "/out")) + "/results.txt";
   FileMap qf((dir + "/queries.txt").c_str());
   FileMap df((dir + "/docs.txt").c_str());
 
   Terms terms;
-  terms.rehash(1 << 16);
   std::vector<Qry> queries;
   std::vector<u32> qterms;
   std::vector<char> qops;
@@ -820,7 +931,7 @@ int main() {
       while (s < lend) {
         const uint8_t* t = s;
         while (s < lend && *s != ' ') ++s;
-        qterms.push_back(terms.add(make_key(t, static_cast<u32>(s - t))));
+        qterms.push_back(terms.add(t, static_cast<u32>(s - t)));
         if (s >= lend) break;
         ++s;
         if (s + 3 <= lend && std::memcmp(s, "AND", 3) == 0) {
@@ -844,7 +955,7 @@ int main() {
       while (s < lend && *s != '"') {
         const uint8_t* t = s;
         while (s < lend && *s != ' ' && *s != '"') ++s;
-        qterms.push_back(terms.add(make_key(t, static_cast<u32>(s - t))));
+        qterms.push_back(terms.add(t, static_cast<u32>(s - t)));
         if (s < lend && *s == ' ') ++s;
       }
       q.n = static_cast<u32>(qterms.size() - q.begin);
@@ -855,6 +966,8 @@ int main() {
   int T = thread_count();
   auto t0 = std::chrono::steady_clock::now();
   Index ix = build(df, terms, qterms, T);
+  malloc_trim(0);
+  malloc_trim(0);
   auto t1 = std::chrono::steady_clock::now();
 
   constexpr int kSlot = 128;

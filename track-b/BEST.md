@@ -8,5 +8,8 @@ The number that must not regress is the board wall time. A later push to this tr
 | 1 | 2026-10-30 | pending | | 1.06 s | first submission, 4-core VM, warm cache, RSS 1201 MB |
 | 2 | 2026-10-30 | run-dc290f6c634f | 766 ms | 1.06 s | board floor before this merge. 42.53 pts, 1053 MB, S=864 |
 | 3 | 2026-10-30 | | | 0.51 s | VERIFIED-WIN 1917047. Bitmaps, 16-bit postings, phrases on raw text, anon RSS 63 MB. Integrator recheck: full-seed sha256 match, tiny match, warm 0.52 s, anon 63 MB |
+| 4 | 2026-10-30 | run-da7739366067 | 391.620 ms | | 60.506 pts, 81,674,240 B, S=982. Points floor this merge has to beat |
+| 5 | 2026-10-30 | | | 0.475 s | VERIFIED-WIN 00c8f08. Integrator recheck: full-seed sha256 matches, tiny matches, warm 0.475 s |
 
+VERIFIED-WIN: 00c8f08ffba04156ac714248eac57e7644108e1f local T=463 RSS=65 src=1093
 VERIFIED-WIN: 191704758caa1f83e2f6c15e9f7624129fb9d4ad local T=514 RSS=63 src=27207
