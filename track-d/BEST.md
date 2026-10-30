@@ -19,3 +19,4 @@ VERIFIED-WIN: 6eed07d local T=465 RSS=65 src=317
 | local | 2026-10-30 | | 614 ms | 79 MiB | ~54 est | | VERIFIED-WIN acb4383. SWAR parse, 512-node blobs, radix heap. Static binary, full seed 1. |
 | local | 2026-10-30 | | 520 ms | 79 MiB | ~57.5 est | | VERIFIED-WIN aaf13d1. Dial buckets. Static full seed 1, four runs 506–552 ms, median 520. src is folder lines. |
 | local | 2026-10-30 | | 465 ms | 65 MiB | ~59.5 est | | Mapped file, packed edges, every core. Static medians vs aaf13d1: T=1 1.497s vs 1.671s, T=4 0.493s vs 0.526s, T=12 0.465s vs 0.509s. Warm cgroup peak 65 MiB at 12 workers vs 85. |
+| local | 2026-10-30 | | 465 ms | 65 MiB | ~+5.5 S | | Same static binary as 6eed07d. clang-format --style=LLVM leaves the file unchanged. C++ code lines 278 to 51. |

@@ -8,3 +8,4 @@
 | 6 | SWAR parse, 512-node blobs, radix heap | local | 0.614 | 79 | ~54 est |
 | 7 | Dial buckets, same pages and blobs | local | 0.520 | 79 | ~57.5 est |
 | 8 | Mapped SWAR parse, one word per edge | local | 0.465 | 65 | ~59.5 est |
+| 9 | Pack source, clang-format off, same binary | local | 0.465 | 65 | ~+5.5 from S |
