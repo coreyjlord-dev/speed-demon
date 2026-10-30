@@ -14,6 +14,8 @@ The number that must not regress is the board wall time. A later push to this tr
 | 7 | 2026-10-30 | | | 0.498 s | VERIFIED-WIN 738ea1d. Integrator recheck: full-seed sha256 matches, tiny matches. Same index, fewer lines |
 | 8 | 2026-10-30 | run-1659125acbb3 | 338.407 ms | | 63.307 pts, 80,273,408 B, S=692. Floor for the 211-line pack |
 | local | 2026-10-30 | | | | VERIFIED-WIN 688e93d. Integrator recheck: full-seed sha256 matches, tiny matches. Local clang-format count 203 |
+| 9 | 2026-10-30 | run-29ef33dfa658 | 333.380 ms | | 67.306 pts, 81,158,144 B, S=210. Floor for the start-bit walk |
+| local | 2026-10-30 | | | | BOARD-CANDIDATE c6c556a. Integrator recheck: full-seed sha256 matches, tiny matches |
 
 VERIFIED-WIN: 738ea1da420442d1b22c6ea97fb6c396e0bc4629 local T=434 RSS=70 src=699
 VERIFIED-WIN: 00c8f08ffba04156ac714248eac57e7644108e1f local T=463 RSS=65 src=1093

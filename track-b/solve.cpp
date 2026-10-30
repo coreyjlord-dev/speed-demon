@@ -117,11 +117,11 @@ emit(terms.find_fast(t.w0, t.w1, t.n, t.h, t.s))); }; auto push = [&](const uint
 words_of(s, len, w0, w1); u64 h = mix_tok(w0, w1, len); IF(!seen.claim(h, w0, w1, len, s), return);
 IB(cn == kLag, FB(int i = 0; i < cn; ++i, terms.prefetch(buf[cur][i].h)); IF(prev >= 0, probe(prev, pn)); prev = cur; pn = cn; cur ^= 1; cn = 0);
 buf[cur][cn++] = P{s, len, w0, w1, h}; }; const uint8_t *tok = nullptr; auto flush = [&](const uint8_t *end) { IB(tok, push(tok, (u32)(end - tok)); tok = nullptr); };
-const uint8_t *p = q; WB(p + 32 <= e, u32 m = token_mask32(p); IB(m == 0, flush(p); p += 32; continue); IB(m == ~0u, IF(!tok, tok = p); p += 32; continue); u32 bit = 0;
-IB(tok, IB(m & 1u, u32 run = (u32)__builtin_ctz(~m); flush(p + run); bit = run) EL(flush(p))); WB(bit < 32, u32 rest = m >> bit; IF(!rest, break);
-bit += (u32)__builtin_ctz(rest); IF(bit >= 32, break); rest = m >> bit; u32 ones = (u32)__builtin_ctz(~rest);
-IB(bit + ones >= 32, tok = p + bit; break); push(p + bit, ones); bit += ones); p += 32); WB(p < e, IB(is_token(*p), IF(!tok, tok = p)) EL(IF(tok, flush(p))); ++p);
-flush(e); IF(cn, FB(int i = 0; i < cn; ++i, terms.prefetch(buf[cur][i].h))); IF(prev >= 0, probe(prev, pn)); IF(cn, probe(cur, cn)); }
+const uint8_t *p = q; WB(p + 32 <= e, u32 m = token_mask32(p); IB(m == ~0u, IF(!tok, tok = p); p += 32; continue); IB(tok, IB(!m, flush(p)) EB(u32 gap =
+(u32)__builtin_ctz(~m); flush(p + gap); m &= ~((1u << gap) - 1))); u32 st = m & ~(m << 1); WB(st, u32 s = (u32)__builtin_ctz(st); u32 len =
+(u32)__builtin_ctz(~(m >> s)); IB(s + len >= 32, tok = p + s; break); push(p + s, len); st &= st - 1); p += 32); WB(p < e, IB(is_token(*p), IF(!tok, tok = p))
+EL(IF(tok, flush(p))); ++p); flush(e); IF(cn, FB(int i = 0; i < cn; ++i, terms.prefetch(buf[cur][i].h))); IF(prev >= 0, probe(prev, pn)); IF(cn, probe(cur,
+cn)); }
 
 struct BlockLog { static constexpr size_t kBlock = 1 << 18, kBytes = 3 * kBlock + 4; vector<uint8_t *> blocks; uint8_t *cur = nullptr; size_t fill = kBlock;
 
