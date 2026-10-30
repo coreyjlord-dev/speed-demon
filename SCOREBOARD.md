@@ -24,4 +24,4 @@ Best-3 geometric mean of points: **66.32** (A, D, B).
 
 Reference anchors: A 32.047 s / 228 MB / S 56, B 56.35 s / 2200 MB / S 91, C 14.44 s / 367 MB / S 108, D 72.69 s / 893 MB / S 43.
 
-Points floors that must not drop: A 74.569 (`89b9471`, 43.757 ms, S=294), B 63.307 (`52ffffc`, 338.407 ms, S=692), C 62.969 (`3143e3a`, 75.285 ms, S=399), D 63.490 (`52ffffc`, 330.916 ms, S=285). This push is A's 4-byte records (`b951722`). Revert only that change if points fall below 74.569.
+Points floors that must not drop: A 74.569 (`89b9471`, 43.757 ms, S=294), B 63.307 (`52ffffc`, 338.407 ms, S=692), C 62.969 (`3143e3a`, 75.285 ms, S=399), D 63.490 (`52ffffc`, 330.916 ms, S=285). This push packs B to `688e93d`. Floor is 63.307. If points fall below that, fall back to `453689e`.
