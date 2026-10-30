@@ -1,6 +1,8 @@
-# Speed Demon 2026 starter
+# Speed Demon 2026 — Gigatron
 
-A working entry for all four tracks of [Speed Demon 2026](https://speeddemon.dev). Each `track-*` folder holds the organisers' naive Python reference, packaged the way the live board builds and runs it. Use it to check your setup end to end, then replace the reference with your own code.
+Corey Lord's entry for all four tracks. Each `track-*` folder is a zero-dependency C++ program (`solve.cpp`) that reads `/data` and writes the one output file for that track. The board builds and runs every push of this `speed-demon` branch.
+
+The notes below are the starter's build and scoring contract.
 
 ## Start in five steps
 
