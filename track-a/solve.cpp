@@ -1,6 +1,4 @@
-// Track A: tail scan, per-hour 6-byte records, partial select, in-order write.
-// Equal byte slices match the time-ordered log, so 12 threads on the scorer
-// each own a contiguous run of hours. No extra writer thread.
+// Track A: tail scan, per-hour 6-byte records, in-cache select, writer thread.
 // Nearest rank is (p * n + 99) / 100 - 1. A 5xx is status[0] == '5'.
 
 #include <algorithm>
@@ -21,7 +19,6 @@
 #include <vector>
 
 namespace {
-using namespace std;
 
 constexpr int kH = 72;
 constexpr uint32_t kCap = 2048;
@@ -44,7 +41,7 @@ int nthreads() {
     int n = atoi(e);
     if (n >= 1 && n <= 64) return n;
   }
-  unsigned h = thread::hardware_concurrency();
+  unsigned h = std::thread::hardware_concurrency();
   return h ? (h > 12 ? 12 : (int)h) : 1;
 }
 
@@ -96,7 +93,7 @@ struct Slot {
 };
 
 struct Worker {
-  string bytes;
+  std::string bytes;
   Slot slots[kSlots]{};
   uint32_t nids = 0;
   const char* blob = nullptr;
@@ -227,11 +224,11 @@ void select3(uint32_t* a, uint32_t n, uint32_t& a50, uint32_t& a95, uint32_t& a9
   uint32_t i50 = (uint32_t)((50ull * n + 99) / 100 - 1);
   uint32_t i95 = (uint32_t)((95ull * n + 99) / 100 - 1);
   uint32_t i99 = (uint32_t)((99ull * n + 99) / 100 - 1);
-  if (n <= 96) isort(a, n);
+  if (n <= 48) isort(a, n);
   else {
-    nth_element(a, a + i99, a + n);
-    nth_element(a, a + i95, a + i99 + 1);
-    nth_element(a, a + i50, a + i95 + 1);
+    std::nth_element(a, a + i99, a + n);
+    std::nth_element(a, a + i95, a + i99 + 1);
+    std::nth_element(a, a + i50, a + i95 + 1);
   }
   a50 = a[i50];
   a95 = a[i95];
@@ -248,9 +245,14 @@ inline char* putu(char* o, uint32_t x) {
   return o;
 }
 
+struct Piece {
+  std::string text;
+  std::atomic<int> ready{0};
+};
+
 template <class F>
 void run(int n, F fn) {
-  vector<thread> pool;
+  std::vector<std::thread> pool;
   for (int t = 0; t < n; ++t) pool.emplace_back(fn, t);
   for (auto& th : pool) th.join();
 }
@@ -261,8 +263,8 @@ int main() {
   tune();
   const char* data = getenv("DATA");
   const char* outd = getenv("OUT");
-  string in = string(data && *data ? data : "/data") + "/requests.log";
-  string outp = string(outd && *outd ? outd : "/out") + "/summary.txt";
+  std::string in = std::string(data && *data ? data : "/data") + "/requests.log";
+  std::string outp = std::string(outd && *outd ? outd : "/out") + "/summary.txt";
   int fd = open(in.c_str(), O_RDONLY);
   if (fd < 0) die("open");
   struct stat st {};
@@ -279,7 +281,7 @@ int main() {
   madvise(mapped, flen, MADV_RANDOM);
   const char* file = (const char*)mapped;
   int T = nthreads();
-  vector<size_t> cut(T + 1);
+  std::vector<size_t> cut(T + 1);
   cut[0] = 0;
   cut[T] = flen;
   for (int t = 1; t < T; ++t) {
@@ -288,7 +290,7 @@ int main() {
       while (pos < flen && file[pos - 1] != '\n') ++pos;
     cut[t] = pos;
   }
-  vector<Worker> ws(T);
+  std::vector<Worker> ws(T);
   for (int t = 0; t < T; ++t) ws[t].bytes.reserve(1 << 16);
   run(T, [&](int t) {
     if (cut[t] < cut[t + 1]) parse_slice(ws[t], file, cut[t], cut[t + 1], flen);
@@ -300,17 +302,17 @@ int main() {
     uint32_t n;
     uint16_t tid, lid;
   };
-  vector<Name> names;
+  std::vector<Name> names;
   for (int t = 0; t < T; ++t)
     for (const Slot& sl : ws[t].slots)
       if (sl.h) names.push_back({ws[t].bytes.data() + sl.off, sl.len, (uint16_t)t, (uint16_t)sl.id});
-  sort(names.begin(), names.end(), [](const Name& a, const Name& b) {
+  std::sort(names.begin(), names.end(), [](const Name& a, const Name& b) {
     int c = memcmp(a.s, b.s, a.n < b.n ? a.n : b.n);
     return c ? c < 0 : a.n < b.n;
   });
-  string blob;
+  std::string blob;
   blob.reserve(1 << 16);
-  vector<uint32_t> eoff, elen, rank(T * kCap);
+  std::vector<uint32_t> eoff, elen, rank(T * kCap);
   uint32_t nids = 0;
   for (size_t i = 0; i < names.size(); ++i) {
     bool same = i && names[i].n == names[i - 1].n && !memcmp(names[i].s, names[i - 1].s, names[i].n);
@@ -331,12 +333,20 @@ int main() {
     snprintf(hours[i], 21, "%04d-%02d-%02dT%02d:00:00Z", 2026, month, dom, hr);
   }
 
-  atomic<int> wr{0};
-  atomic<int> next{0};
+  Piece piece[kH];
+  std::thread writer([&] {
+    for (int h = 0; h < kH; ++h) {
+      while (!piece[h].ready.load(std::memory_order_acquire)) _mm_pause();
+      if (!piece[h].text.empty()) fwrite(piece[h].text.data(), 1, piece[h].text.size(), fp);
+      std::string().swap(piece[h].text);
+    }
+  });
+
+  std::atomic<int> next{0};
   int ht = T < kH ? T : kH;
   run(ht, [&](int) {
     for (;;) {
-      int h = next.fetch_add(1, memory_order_relaxed);
+      int h = next.fetch_add(1, std::memory_order_relaxed);
       if (h >= kH) break;
       uint32_t cnt[kCap] = {}, er[kCap] = {}, N = 0;
       for (int w = 0; w < T; ++w)
@@ -347,15 +357,14 @@ int main() {
             er[g] += b->r[i].meta >> 15;
             ++N;
           }
-      string text;
+      std::string text;
       if (N) {
         uint32_t pref[kCap], cur[kCap], s = 0;
         for (uint32_t g = 0; g < nids; ++g) {
           pref[g] = cur[g] = s;
           s += cnt[g];
         }
-        uint32_t* lat = (uint32_t*)malloc((size_t)N * 4);
-        if (!lat) die("oom");
+        std::vector<uint32_t> lat(N);
         for (int w = 0; w < T; ++w)
           for (B* b = ws[w].hour[h].head; b; b = b->next)
             for (uint32_t i = 0; i < b->n; ++i)
@@ -365,7 +374,7 @@ int main() {
         for (uint32_t g = 0; g < nids; ++g) {
           if (!cnt[g]) continue;
           uint32_t p50, p95, p99;
-          select3(lat + pref[g], cnt[g], p50, p95, p99);
+          select3(lat.data() + pref[g], cnt[g], p50, p95, p99);
           char line[192];
           char* o = line;
           memcpy(o, hours[h], 20);
@@ -382,15 +391,14 @@ int main() {
           *o++ = '\n';
           text.append(line, (size_t)(o - line));
         }
-        free(lat);
       } else {
         for (int w = 0; w < T; ++w) ws[w].hour[h].clear();
       }
-      while (wr.load(memory_order_acquire) != h) _mm_pause();
-      if (!text.empty()) fwrite(text.data(), 1, text.size(), fp);
-      wr.store(h + 1, memory_order_release);
+      piece[h].text = std::move(text);
+      piece[h].ready.store(1, std::memory_order_release);
     }
   });
+  writer.join();
   fclose(fp);
   malloc_trim(0);
   return 0;

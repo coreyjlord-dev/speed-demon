@@ -1,6 +1,6 @@
 # Gigatron scoreboard
 
-Board snapshot `2026-10-30T21:34:37Z`, head `080012c`. Machine points are `50 * log10(K)` with
+Board snapshot `2026-10-30T21:50:09Z`, head `6496adb`. Machine points are `50 * log10(K)` with
 
 `K = (T_ref/T)^0.50 * min(M_ref/M, 50)^0.20 * min(S_ref/S, 1)^0.15 * (D_ref/D)^0.15`.
 
@@ -8,20 +8,20 @@ D is 1 on every track. S is scc code lines after `clang-format --style=LLVM`. M 
 
 | Track | Commit | Run | T | RSS | S | Points | Time rank | Points rank |
 |---|---|---|---|---|---|---|---|---|
-| A | `080012c` | run-7f4efd862cbe | 42.031 ms | 31,002,624 | 415 | 74.197 | 13 of 64 | 18 of 64 |
-| B | `25fd2dd` | run-da7739366067 | 391.620 ms | 81,674,240 | 982 | 60.506 | 11 of 51 | 10 of 51 |
+| A | `a5f4152` | run-70324b027658 | 41.141 ms | 32,145,408 | 415 | 74.272 | 13 of 64 | 18 of 64 |
+| B | `6496adb` | run-fa4b9f4d7267 | 338.400 ms | 80,154,624 | 1090 | 61.834 | 8 of 51 | 9 of 51 |
 | C | `9710a7a` | run-d2451a1db7a8 | 74.864 ms | 35,385,344 | 582 | 61.813 | 19 of 55 | 24 of 55 |
-| D | `080012c` | run-b062dc46fc08 | 413.966 ms | 85,639,168 | 550 | 57.993 | 22 of 57 | 19 of 57 |
+| D | `6496adb` | run-f7d5e71800b6 | 362.082 ms | 89,636,864 | 289 | 61.345 | 17 of 57 | 8 of 57 |
 
-Best-3 geometric mean of points: **65.23** (A, C, B).
+Best-3 geometric mean of points: **65.68** (A, B, D).
 
 | Track | Leader points | Leader | Leader T | Leader RSS | Leader S |
 |---|---|---|---|---|---|
 | A | 83.961 | Kirk Mates | 22.77 ms | 20.5 MB | 260 |
 | B | 67.211 | Cause Of Death | 283.77 ms | 41.1 MB | 837 |
-| C | 73.907 | Cosmic | 49.69 ms | 9.9 MB | 284 |
-| D | 72.326 | Cause Of Death | 128.01 ms | 66.2 MB | 447 |
+| C | 74.258 | Cause Of Death | 36.77 ms |  | 563 |
+| D | 72.344 | Cause Of Death | 126.58 ms |  | 447 |
 
 Reference anchors: A 32.047 s / 228 MB / S 56, B 56.35 s / 2200 MB / S 91, C 14.44 s / 367 MB / S 108, D 72.69 s / 893 MB / S 43.
 
-Points floors that must not drop: A 74.272 (`a5f4152`, 41.141 ms, S=415), B 60.506 (`25fd2dd`, 391.620 ms), C 61.813 (`9710a7a`), D 58.275 (`a5f4152`, 403.530 ms, S=550). This push adds A `e66eb72` and D `aaf13d1`. B `00c8f08` is already on `f09ce94`.
+Points floors that must not drop: A 74.272 (`a5f4152`, 41.141 ms, S=415), B 61.834 (`6496adb`, 338.400 ms, S=1090), C 61.813 (`9710a7a`), D 61.345 (`6496adb`, 362.082 ms, S=289). `e66eb72` scored 70.601 ms and 68.413 points, so Track A is reverted to `5f407db`. B `00c8f08` and D `aaf13d1` stay.
