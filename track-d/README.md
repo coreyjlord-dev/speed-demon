@@ -1,6 +1,6 @@
 # Track D: Traverse
 
-Forward Dijkstra on one CSR. Nodes are renumbered by BFS so a search stays in a small set of 512-node distance pages, which are recycled after every query. The graph is counted, then filled, and the old arrays are released before the queries run.
+Forward Dijkstra on one CSR. A SWAR parse counts the edges, then fills them. Threads grow 512-node BFS blobs so a search stays in a few distance pages, recycled after every query. Queries use every core, capped at 12.
 
 ## Dependencies
 
