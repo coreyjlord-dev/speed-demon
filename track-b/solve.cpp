@@ -92,11 +92,8 @@ inline void words_of(const uint8_t* s, u32 n, u64& w0, u64& w1) {
 }
 
 inline u64 mix_tok(u64 w0, u64 w1, u32 n) {
-  u64 h = w0 + 0x9E3779B185EBCA87ull;
-  h ^= w1 + ((u64)n << 1);
-  h *= 0xC2B2AE3D27D4EB4Full;
-  h ^= h >> 33;
-  return h * 0x165667B19E3779F9ull;
+  u64 h = (w0 ^ (w1 + ((u64)n << 1))) * 0xC2B2AE3D27D4EB4Full;
+  return h ^ (h >> 33);
 }
 
 template <bool Raw>
@@ -324,6 +321,13 @@ Index build(const FileMap& file, Terms& terms, vector<u32>& qterms, int T) {
   vector<size_t> cut((size_t)T + 1);
   FB(int t = 0; t <= T; ++t, size_t c = size * (size_t)t / (size_t)T; WH(c > 0 && c < size && base[c - 1] != '\n', ++c);
      cut[t] = c);
+  // Each bitmap word covers 64 document ids. Interior cuts move forward to a
+  // multiple of 64 so a word is written by one thread and the or can be plain.
+  FB(int t = 1; t < T; ++t, const uint8_t* p = base + cut[t]; const uint8_t* lim = base + cut[t + 1];
+     u32 id = p < lim ? parse_id(p) : 0; u32 want = (id + 63u) & ~63u;
+     WB(p < lim && id < want, const uint8_t* nl = (const uint8_t*)memchr(p, '\n', lim - p); IF(!nl, break); p = nl + 1;
+        ++id);
+     cut[t] = (size_t)(p - base));
   vector<vector<u32>> count((size_t)T);
   vector<u32> sampled((size_t)T);
   parallel(T, [&](int t) {
@@ -370,8 +374,7 @@ Index build(const FileMap& file, Terms& terms, vector<u32>& qterms, int T) {
       doc_seen.next();
       for_tokens(tx, nl, terms, doc_seen, [&](u32 id) {
         IF(id >= nterms, return);
-        IB(u32 d = ix.dense[id]; d != kNone,
-           __atomic_or_fetch(&ix.bits[(size_t)d * ix.words + (doci >> 6)], 1ull << (doci & 63), __ATOMIC_RELAXED))
+        IB(u32 d = ix.dense[id]; d != kNone, ix.bits[(size_t)d * ix.words + (doci >> 6)] |= 1ull << (doci & 63))
         EB(out[id >> kTermBits].push(((id & (kBucket - 1)) << kDocBits) | (doci - first)); cnt[id]++);
       });
     });
