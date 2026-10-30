@@ -4,9 +4,9 @@ Group 3.1M request lines by UTC hour and endpoint, then emit count, nearest-rank
 
 ## Approach
 
-The timestamp is a fixed 27-byte field inside one 72-hour window, so the hour is a few digits at fixed offsets, not a calendar parse. One pass files a 6-byte record into that hour. The method ends at a branchless SWAR space, the latency is a masked 8-digit horner, and the endpoint hash is a CRC of the first, middle, and last 8 bytes; length and hash are compared before any `memcmp`. Each hour is counting-sorted by endpoint and the three nearest ranks are taken while that hour is still in cache. A writer thread emits hours in order and releases each buffer after the write. The run uses every hardware thread up to 12. Transparent huge pages are off, and `mallopt` (`M_TRIM_THRESHOLD`, `M_MMAP_THRESHOLD`) returns freed blocks to the OS. Finished pages of the mapping are dropped; the file is not populated up front.
+The timestamp is a fixed 27-byte field inside one 72-hour window, so the hour is a few digits at fixed offsets, not a calendar parse. One pass files a 6-byte record into that hour. The method ends at a branchless SWAR space, the latency is a masked 8-digit horner, and the endpoint hash is a CRC of the first, middle, and last 8 bytes; length and hash are compared before any `memcmp`. Each hour is counting-sorted by endpoint. Groups of up to 96 latencies are insertion-sorted; larger groups use three partial selections. Workers write hours in order, so the run stays at one thread per slice with no extra writer. The cap is 12 threads: the input is time-ordered, and equal byte slices each cover a contiguous run of hours. Transparent huge pages are off, and `mallopt` (`M_TRIM_THRESHOLD`, `M_MMAP_THRESHOLD`) returns freed blocks to the OS. Finished pages of the mapping are dropped; the file is not populated up front.
 
-Status is an error exactly when the first digit is `5` (500–599). Duplicate lines both count. Workers equal one per physical core when the run exposes hyperthreads.
+Status is an error exactly when the first digit is `5` (500–599). Duplicate lines both count. Thread count is `hardware_concurrency`, capped at 12.
 
 ## Dependencies
 
