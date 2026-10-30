@@ -12,4 +12,4 @@ None. Static C++20.
 
 ## With another 24 hours
 
-The scan is still most of the run. Term lookup hits a 1 MB table and skips a token already recorded in the current document. Formatted source is 699 lines. What is left is the query phase, about 130 ms, and the anonymous scan peak from the 3-byte log. The record on the board is about 0.29 s and 70 MB.
+The scan is still most of the run. Term lookup hits a 1 MB table, skips a token already recorded in the current document, and folds the key with one multiply. Bitmap updates are plain ors. Formatted source is 702 lines. What is left is the query phase, about 130 ms, and the anonymous scan peak from the 3-byte log. The record on the board is about 0.29 s and 70 MB.
