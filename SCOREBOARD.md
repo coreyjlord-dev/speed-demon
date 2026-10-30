@@ -11,9 +11,9 @@ D is 1 on every track. S is scc code lines after `clang-format --style=LLVM`. M 
 | A | `e48c45c` | run-4c86463b810f | 41.140 ms | 30,961,664 | 415 | 74.435 | 14 of 64 | 18 of 64 |
 | B | `6496adb` | run-fa4b9f4d7267 | 338.400 ms | 80,154,624 | 1090 | 61.834 | 8 of 51 | 9 of 51 |
 | C | `9710a7a` | run-d2451a1db7a8 | 74.864 ms | 35,385,344 | 582 | 61.813 | 19 of 55 | 24 of 55 |
-| D | `d3853f9` | run-23b521c3b8dc | 355.748 ms | 89,526,272 | 289 | 61.542 | 16 of 57 | 9 of 57 |
+| D | `069146c` | run-177ddcf318b6 | 333.666 ms | 69,804,032 | 285 | 63.363 | 15 of 57 | 6 of 57 |
 
-Best-3 geometric mean of points: **65.68** (A, B, D).
+Best-3 geometric mean of points: **66.32** (A, D, B).
 
 | Track | Leader points | Leader | Leader T | Leader RSS | Leader S |
 |---|---|---|---|---|---|
@@ -24,4 +24,4 @@ Best-3 geometric mean of points: **65.68** (A, B, D).
 
 Reference anchors: A 32.047 s / 228 MB / S 56, B 56.35 s / 2200 MB / S 91, C 14.44 s / 367 MB / S 108, D 72.69 s / 893 MB / S 43.
 
-Points floors that must not drop: A 74.435 (`e48c45c`, 41.140 ms, S=415), B 61.834 (`6496adb`, 338.400 ms, S=1090), C 61.813 (`9710a7a`), D 61.542 (`d3853f9`, 355.748 ms, S=289). This push replaces D with `6eed07d`. Revert D if points fall below 61.542.
+Points floors that must not drop: A 74.435 (`e48c45c`, 41.140 ms, S=415), B 61.834 (`6496adb`, 338.400 ms, S=1090), C 61.813 (`9710a7a`), D 63.363 (`069146c`, 333.666 ms, S=285). `6eed07d` cleared 61.542.
