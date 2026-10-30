@@ -4,7 +4,7 @@ Group 3.1M request lines by UTC hour and endpoint, then emit count, nearest-rank
 
 ## Approach
 
-The timestamp is a fixed 27-byte field inside one 72-hour window, so the hour is a few digits at fixed offsets, not a calendar parse. Each worker maps the file, takes a newline-aligned slice, and interns endpoints in an open-addressed table keyed by a 64-bit hash. Latencies for a group live in a bump arena, so a hot endpoint does not bounce through the allocator. After the slices merge, each group runs three `nth_element` calls at the nearest-rank indexes `(p * n + 99) / 100 - 1`. Lines come out hour by hour, endpoints in unsigned byte order.
+The timestamp is a fixed 27-byte field inside one 72-hour window, so the hour is a few digits at fixed offsets, not a calendar parse. The file is mapped once and walked in 1 MB windows (`MADV_POPULATE_READ`, then `MADV_DONTNEED`) so the log does not stay in RSS. Pass one counts each (hour, endpoint) group. Pass two writes each latency into one exact `uint32` slot. Percentiles are nearest-rank at `(p * n + 99) / 100 - 1`. Output is streamed from a 64 KB buffer after those arrays are released.
 
 Status is an error exactly when the first digit is `5` (500–599). Duplicate lines both count. Workers equal one per physical core when the run exposes hyperthreads.
 
