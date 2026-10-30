@@ -12,12 +12,12 @@ The number that must not regress is the board wall time. A later push has to bea
 | 5 | 2026-10-30 | local | 78.7 ms | 30.4 MB | | | per-hour blocks, SIMD scan, writer thread, THP disabled. Median of 4 warm static runs. Formatted lines about 503. Est. points 66.9 vs local 64.4 and board floor 61.89 |
 | 6 | 2026-10-30 | local | 65.2 ms | 25.0 MB | | | Tail scan, masked 64-byte hash, 6-byte records, mallopt trim/mmap, up to 12 threads. Median of 8 warm static runs on 4 cores. Formatted lines about 485. Est. points 69.9 |
 | 7 | 2026-10-30 | local | 57.1 ms | 23.0 MB | | | SWAR method end, CRC of three 8-byte samples, multiply latency, hour text released after write. Median of 8 warm static runs on 4 cores. Formatted lines 408. Est. points 72.2 |
-| 8 | 2026-10-30 | local | 53.5 ms | 22.9 MB | | | Hour workers write in order, latency buffer is not zeroed, insertion sort through 96. Median of 8 warm static runs on 4 cores. Formatted lines 399. Est. points 73.0 |
-| 9 | 2026-10-30 | local | 52.2 ms | 22.9 MB | | | Radix sort for groups of 512 and up. Median of 8 warm static runs on 4 cores. Formatted lines 427. Est. points 73.07. Same-session floor binary was 55.6 ms |
+| 8 | 2026-10-30 | local | 53.5 ms | 22.9 MB | | | Hour workers write in order, latency buffer is not zeroed, insertion sort through 96. Median of 8 warm static runs on 4 cores. Formatted lines 399. Est. points 73.0. Board rejected this line: 70.6 ms / 68.41 pts |
+| 9 | 2026-10-30 | local | 52.2 ms | 22.9 MB | | | Radix sort for groups of 512 and up. Built on the reverted line, so it is not the floor |
+| 10 | 2026-10-30 | board | 41.1 ms | | 74.27 | | 5f407db restored by the integrator after the points drop. Local reference remains 57.1 ms / 23.0 MB / 408 lines / 72.22 pts |
+| 11 | 2026-10-30 | local | 58.4 ms | 17.5 MB | | | 4-byte packed records, overflow list, malloc arenas capped at 2. Paired with 5f407db in the same session (61.1 ms / 22.7 MB). 12 threads 65.7 ms / 22.2 MB vs 5f407db 68.0 ms / 28.4 MB. Formatted lines 432. Est. points 72.98 |
 
-VERIFIED-WIN: 85186b8 local T=52.2 RSS=22.9 src=12168
-
-VERIFIED-WIN: e66eb72 local T=53.5 RSS=22.9 src=11467
+VERIFIED-WIN: 59410ea local T=58.4 RSS=17.5 src=12273
 
 VERIFIED-WIN: 5f407db local T=57.1 RSS=23.0 src=11635
 
