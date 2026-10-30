@@ -5,6 +5,7 @@ The number that must not regress is the board wall time. A later push has to bea
 VERIFIED-WIN: 5d27373 local T=681 RSS=85 src=541
 VERIFIED-WIN: acb4383 local T=614 RSS=79 src=582
 VERIFIED-WIN: aaf13d1 local T=520 RSS=79 src=318
+VERIFIED-WIN: 6eed07d local T=465 RSS=65 src=317
 
 | # | When (UTC) | Board run | Board T | Board RSS | Points | Rank | Notes |
 |---|---|---|---|---|---|---|---|
