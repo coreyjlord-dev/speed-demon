@@ -1,8 +1,9 @@
 # Track B: performance log
 
-Local numbers are a warm run on this 4-core VM. They are not board scores. Peak RSS includes the mapped corpus.
+Local numbers are a warm run on this 4-core VM. They are not board scores. M is peak anonymous RSS. The board prewarms `/data`, so the mapped corpus is not part of that number. Transparent huge pages are disabled so partial pages are not rounded up to 2 MB.
 
 | Step | Change | Run ID | T (s) | M (MB) | Points |
 |---|---|---|---|---|---|
 | 0 | The reference, unchanged | | 56.35 | 2,200 | 0 |
 | 1 | C++ query-term index, bitsets for wide postings, positional phrases, parallel scan | local | 1.06 | 1,201 | |
+| 2 | No positions: phrases checked on raw text. Bitmaps for terms above 1/32 of a sample. 16-bit postings filled from a 3-byte mmap log. AVX2 tokenizer, lookup prefetch, huge pages off | local | 0.51 | 63 | |
