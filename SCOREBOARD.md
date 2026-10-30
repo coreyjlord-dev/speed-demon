@@ -24,4 +24,4 @@ Best-3 geometric mean of points: **65.23** (A, C, B).
 
 Reference anchors: A 32.047 s / 228 MB / S 56, B 56.35 s / 2200 MB / S 91, C 14.44 s / 367 MB / S 108, D 72.69 s / 893 MB / S 43.
 
-Points floors that must not drop: A 74.197 (`080012c`, 42.031 ms, S=415), B 60.506 (`25fd2dd`, 391.620 ms, S=982), C 61.813 (`9710a7a`), D 57.993 (`080012c`, 413.966 ms, S=550). The next push replaces B with `00c8f08` (local recheck 475 ms, full-seed hash match). Revert B if the board points fall below 60.506.
+Points floors that must not drop: A 74.272 (`a5f4152`, 41.141 ms, S=415), B 60.506 (`25fd2dd`, 391.620 ms), C 61.813 (`9710a7a`), D 58.275 (`a5f4152`, 403.530 ms, S=550). This push adds A `e66eb72` and D `aaf13d1`. B `00c8f08` is already on `f09ce94`.

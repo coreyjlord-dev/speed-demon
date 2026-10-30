@@ -3,6 +3,7 @@
 The number that must not regress is the board wall time. A later push has to beat the best board T in this table.
 
 VERIFIED-WIN: 5d27373 local T=681 RSS=85 src=541
+VERIFIED-WIN: aaf13d1 local T=520 RSS=79 src=318
 VERIFIED-WIN: acb4383 local T=614 RSS=79 src=582
 
 | # | When (UTC) | Board run | Board T | Board RSS | Points | Rank | Notes |
@@ -18,4 +19,6 @@ VERIFIED-WIN: acb4383 local T=614 RSS=79 src=582
 | 6 | 2026-10-30 | run-310c50829b3f | 697 ms | 89 MB | 52.37 | 26 of 56 | commit 286ddb4, paged distances. Points rank 25 of 56. S=518. |
 | 7 | 2026-10-30 | run-93fd12fea066 | 678 ms | 90,124,288 B | 52.609 | 25 of 57 | same paged binary, re-scored on 9710a7a. Points best before acb4383. |
 | local | 2026-10-30 | | 587 ms | | | | VERIFIED-WIN acb4383. Integrator recheck: full-seed sha256 a23dbdf0 matches, tiny matches, warm 0.587 s. Replaces 5d27373. |
-| 8 | 2026-10-30 | run-b062dc46fc08 | 413.966 ms | 85,639,168 B | 57.993 | 22 of 57 | commit 080012c. Points rank 19 of 57. S=550. This is the floor. |
+| 8 | 2026-10-30 | run-b062dc46fc08 | 413.966 ms | 85,639,168 B | 57.993 | 22 of 57 | commit 080012c. Points rank 19 of 57. S=550. |
+| 9 | 2026-10-30 | run-0c8ab4d70dac | 403.530 ms | 85,532,672 B | 58.275 | | same binary, re-scored on a5f4152. S=550. Points floor this merge has to beat. |
+| local | 2026-10-30 | | 524 ms | | | | VERIFIED-WIN aaf13d1. Integrator recheck: full-seed sha256 matches, tiny matches, warm 0.524 s (reported 520 ms). |
