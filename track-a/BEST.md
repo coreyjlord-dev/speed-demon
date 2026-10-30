@@ -19,7 +19,8 @@ The number that must not regress is the board wall time. A later push has to bea
 | 12 | 2026-10-30 | board | 42.967 ms | 30.9 MB | 73.79 | | 59410ea. 5f407db re-scored 41.140 ms / 31.0 MB / S=415 / 74.435. Pack reverted: RSS did not move, time got worse. Arena cap and the overflow side list stay out. Floor is 5f407db |
 | 13 | 2026-10-30 | local | 59.5 ms | 23 MB | | | Line cut on 5f407db. Paired in the same session: 59.5 vs 59.9 ms, RSS 22–23 vs 22. 12 threads 73.4 vs 73.6 ms. Formatted scc 287 vs 408. Same hashes. Est. +1.15 points from S at equal time |
 | 14 | 2026-10-30 | local | 59.4 ms | 18 MB | | | 4-byte records, overflow list, no arena cap. Paired with a8d69d8: 59.4 vs 59.5 ms, RSS 18 vs 22. 12 threads 77.8 vs 77.0 ms. Formatted scc still 287. Est. +1.06 points from memory |
-| 15 | 2026-10-30 | local | 55.5 ms | 18 MB | | | 8192-record blocks and radix select for groups above 64. Paired with b951722: 55.5 vs 58.8 ms, RSS 17–18 both. 12 threads 73.9 vs 84.3 ms. Formatted scc 283. Est. +0.67 points in-session |
+| 15 | 2026-10-30 | local | 55.5 ms | 18 MB | | | 8192-record blocks and radix select for groups above 64. Paired with b951722: 55.5 vs 58.8 ms, RSS 17–18 both. 12 threads 73.9 vs 84.3 ms. Formatted scc 283. Est. +0.67 points in-session. Held: it used clang-format off |
+| 16 | 2026-10-30 | local | 52.7 ms | 18 MB | 75.31 | | Readable rebuild on b951722. No formatter off region, max line 79. Paired 52.7 vs 54.9 ms, RSS 17–18 both. clang-format then scc: S=351. Est. 75.31 vs board 75.447 at S=294 |
 
 Board rejected 59410ea. The local floor is 5f407db until the line cut below.
 
