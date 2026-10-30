@@ -16,3 +16,4 @@ The number that must not regress is the board wall time. A later push has to bea
 | 8 | 2026-10-30 | run-4bbd45a50a0d | 151.251 ms | 103,759,872 B | 49.155 | 31 of 53 | commit 07b6200, same binary re-score. Points rank 35 of 53. S=648. This is the floor. |
 | local | 2026-10-30 | | 82 ms | anon ~30 MB | | | one-pass memchr parse, shared name table, per-country L1 bitset. Full-seed sha256 d8088b1c matches. Tiny and worked match. |
 | 9 | 2026-10-30 | run-d2451a1db7a8 | 74.864 ms | 35,385,344 B | 61.813 | 19 of 55 | commit 9710a7a. Points rank 24 of 55. S=582. This is the floor. Leader Cosmic 73.65 at 51.1 ms / 9.6 MB / S=294. |
+| local | 2026-10-30 | | 83 ms | | | | Same parse and intern, packed onto fewer formatted lines (~395 vs 575 before clang-format). Full-seed sha256 matches. Tiny and worked match. Warm time tied with the 582-line binary. |
