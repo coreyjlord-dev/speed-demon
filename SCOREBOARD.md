@@ -24,4 +24,4 @@ Best-3 geometric mean of points: **65.68** (A, B, D).
 
 Reference anchors: A 32.047 s / 228 MB / S 56, B 56.35 s / 2200 MB / S 91, C 14.44 s / 367 MB / S 108, D 72.69 s / 893 MB / S 43.
 
-Points floors that must not drop: A 74.435 (`e48c45c`, 41.140 ms, S=415), B 61.834 (`6496adb`, 338.400 ms, S=1090), C 61.813 (`9710a7a`), D 61.542 (`d3853f9`, 355.748 ms, S=289). `59410ea` scored 73.787 and was reverted. `42c54bd` scored 526.757 ms and 57.488 points, so D returns to `aaf13d1`.
+Points floors that must not drop: A 74.435 (`e48c45c`, 41.140 ms, S=415), B 61.834 (`6496adb`, 338.400 ms, S=1090), C 61.813 (`9710a7a`), D 61.542 (`d3853f9`, 355.748 ms, S=289). This push replaces D with `6eed07d`. Revert D if points fall below 61.542.
