@@ -18,3 +18,4 @@ VERIFIED-WIN: acb4383 local T=614 RSS=79 src=582
 | 6 | 2026-10-30 | run-310c50829b3f | 697 ms | 89 MB | 52.37 | 26 of 56 | commit 286ddb4, paged distances. Points rank 25 of 56. S=518. |
 | 7 | 2026-10-30 | run-93fd12fea066 | 678 ms | 90,124,288 B | 52.609 | 25 of 57 | same paged binary, re-scored on 9710a7a. Points best before acb4383. |
 | local | 2026-10-30 | | 587 ms | | | | VERIFIED-WIN acb4383. Integrator recheck: full-seed sha256 a23dbdf0 matches, tiny matches, warm 0.587 s. Replaces 5d27373. |
+| 8 | 2026-10-30 | run-b062dc46fc08 | 413.966 ms | 85,639,168 B | 57.993 | 22 of 57 | commit 080012c. Points rank 19 of 57. S=550. This is the floor. |

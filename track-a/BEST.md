@@ -14,6 +14,7 @@ The number that must not regress is the board wall time. A later push has to bea
 | 7 | 2026-10-30 | local | 65.2 ms | 25.0 MB | | | VERIFIED-WIN 3b2062c. Integrator recheck: hash match, warm 72 ms, HWM 24 MB |
 | 8 | 2026-10-30 | run-3d4300618475 | 44.885 ms | 30,584,832 B | 72.988 | 15 of 64 | 3b2062c on the board, commit 286ddb4. S=492. Points floor this merge has to beat |
 | 9 | 2026-10-30 | local | 65 ms | | | | VERIFIED-WIN 5f407db. Integrator recheck: full-seed sha256 matches, tiny matches, warm 65 ms on this machine (reported 57.1 ms). |
+| 10 | 2026-10-30 | run-7f4efd862cbe | 42.031 ms | 31,002,624 B | 74.197 | 13 of 64 | commit 080012c. Points rank 18 of 64. S=415. This is the floor. |
 
 VERIFIED-WIN: 5f407db local T=57.1 RSS=23.0 src=408 lines
 VERIFIED-WIN: 3b2062c local T=65.2 RSS=25.0 src=13575
