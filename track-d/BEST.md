@@ -3,6 +3,7 @@
 The number that must not regress is the board wall time. A later push has to beat the best board T in this table.
 
 VERIFIED-WIN: 5d27373 local T=681 RSS=85 src=541
+VERIFIED-WIN: acb4383 local T=614 RSS=79 src=582
 
 | # | When (UTC) | Board run | Board T | Board RSS | Points | Rank | Notes |
 |---|---|---|---|---|---|---|---|
@@ -13,3 +14,4 @@ VERIFIED-WIN: 5d27373 local T=681 RSS=85 src=541
 | local | 2026-10-30 | | 518 ms | 225 MB | | | VERIFIED-WIN 52f40fd. Integrator recheck matched the full-seed sha256 |
 | 4 | 2026-10-30 | run-a44861ca7ac0 | 645 ms | 291 MB | 46.01 | 25 of 55 | commit 532829d. Points rank 29 of 55. S=971. This is the floor. Record 126 ms (Cause Of Death, 71.7 pts) |
 | local | 2026-10-30 | | 681 ms | 85 MiB | ~52 est | | VERIFIED-WIN 5d27373. One CSR, BFS order, paged distances. src is approximate formatted code lines. |
+| local | 2026-10-30 | | 614 ms | 79 MiB | ~54 est | | VERIFIED-WIN acb4383. SWAR parse, 512-node blobs, radix heap. Static binary, full seed 1. |
