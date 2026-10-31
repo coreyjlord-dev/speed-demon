@@ -1,6 +1,5 @@
-// Track A: tail scan, 4-byte hour records, 8192-record blocks, radix select,
-// writer thread. Nearest rank is (p * n + 99) / 100 - 1. A 5xx is status[0] ==
-// '5'.
+// Track A: tail scan, 4-byte hour records, 8192-record blocks, radix select.
+// Nearest rank is (p * n + 99) / 100 - 1. A 5xx is status[0] == '5'.
 
 #include <algorithm>
 #include <atomic>
@@ -253,11 +252,6 @@ void select3(u32 *a, u32 n, u32 &a50, u32 &a95, u32 &a99) {
   return o;
 }
 
-struct Piece {
-  std::string text;
-  std::atomic<int> ready{0};
-};
-
 template <class F> void run(int n, F fn) {
   std::vector<std::thread> pool;
   for (int t = 0; t < n; ++t)
@@ -340,17 +334,9 @@ int main() {
     snprintf(hours[i], 21, "%04d-%02d-%02dT%02d:00:00Z", 2026, month, dom, hr);
   }
 
-  Piece piece[kH];
-  std::thread writer([&] {
-    for (int h = 0; h < kH; ++h) {
-      while (!piece[h].ready.load(std::memory_order_acquire))
-        _mm_pause();
-      !piece[h].text.empty() &&
-          fwrite(piece[h].text.data(), 1, piece[h].text.size(), fp);
-      std::string().swap(piece[h].text);
-    }
-  });
-
+  // The worker that finishes hour h waits, then writes it. Hours stay in
+  // order, and no extra thread sits on a core spinning for the next buffer.
+  std::atomic<int> turn{0};
   std::atomic<int> next{0};
   int ht = T < kH ? T : kH;
   run(ht, [&](int) {
@@ -390,10 +376,13 @@ int main() {
       }
       for (int w = 0; w < T; ++w)
         ws[w].hour[h].clear();
-      piece[h].text = std::move(text),
-      piece[h].ready.store(1, std::memory_order_release);
+      while (turn.load(std::memory_order_acquire) != h)
+        std::this_thread::yield();
+      if (!text.empty())
+        fwrite(text.data(), 1, text.size(), fp);
+      turn.store(h + 1, std::memory_order_release);
     }
   });
-  writer.join(), fclose(fp), malloc_trim(0);
+  fclose(fp), malloc_trim(0);
   return 0;
 }
