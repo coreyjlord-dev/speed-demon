@@ -6,6 +6,7 @@ VERIFIED-WIN: 5d27373 local T=681 RSS=85 src=541
 VERIFIED-WIN: 42c54bd local T=508 RSS=80 src=318
 VERIFIED-WIN: 6eed07d local T=465 RSS=65 src=317
 READABLE-WIN: ebda02e formatted S=645 est 60.9 points (board 328.9 ms, 69 MB held)
+READABLE-WIN: e99118c formatted S=610 est 61.1 points (board 328.9 ms, 69 MB held)
 VERIFIED-WIN: aaf13d1 local T=520 RSS=79 src=318
 VERIFIED-WIN: acb4383 local T=614 RSS=79 src=582
 
@@ -32,3 +33,4 @@ VERIFIED-WIN: acb4383 local T=614 RSS=79 src=582
 | local | 2026-10-30 | | 497 ms | | | | VERIFIED-WIN 6eed07d. Integrator recheck: full-seed sha256 matches, tiny matches, warm 0.497 s on 4 cores (reported 0.465 s / 65 MiB at 12 threads). |
 | 13 | 2026-10-30 | run-177ddcf318b6 | 333.666 ms | 69,804,032 B | 63.363 | 15 of 57 | commit 069146c. Points rank 6 of 57. S=285. This is the floor. |
 | local | 2026-10-30 | | 329 ms | 69 MB | ~60.9 est | | Readable form of 6eed07d. clang-format LLVM, no off region, lines at most 80. scc S=645. Same hashes. Warm 4-thread time and cgroup peak match 6eed07d. |
+| local | 2026-10-31 | | 329 ms | 69 MB | ~61.1 est | | Leaner readable form, commit e99118c. scc S=610. Same hashes. Warm 4-thread median 0.530 s vs 0.539 s for ebda02e; cgroup peak 59.5–59.9 MiB either way. |
