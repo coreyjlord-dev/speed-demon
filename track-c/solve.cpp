@@ -29,6 +29,7 @@ using u32 = uint32_t;
 using u64 = uint64_t;
 
 constexpr u8 kNoCountry = 0xff;
+// 2^18 slots of 24 bytes is 6 MB: short probes, and the heads fit in L3.
 constexpr u32 kSlots = 1u << 18;
 constexpr u32 kMask = kSlots - 1;
 constexpr u32 kMaxNames = 1u << 17;
@@ -73,6 +74,7 @@ struct Mapped {
     void* p = mmap(nullptr, len, PROT_READ, MAP_PRIVATE, fd, 0);
     if (p == MAP_FAILED) die("mmap");
     data = (const char*)p;
+    // MAP_POPULATE and MADV_WILLNEED were slower than a sequential hint.
     madvise((char*)data, len, MADV_SEQUENTIAL);
   }
 
@@ -159,21 +161,41 @@ inline u64 parse_digits(const char* s, const char* e) {
   return x;
 }
 
-// The hot names fit in the slot. A longer name is a one-off allocation.
+// Open-addressed slot. state is the hash (never 0 or 1), 1 while claimed.
+// Up to 16 name bytes sit in the slot. Longer names are one arena pointer.
 struct Slot {
-  u32 len;
-  u32 id;
-  char name[24];
-  const char* extra;
+  atomic<u32> state;
+  u32 meta;
+  char bytes[16];
+};
+static_assert(sizeof(Slot) == 24, "name slot");
+
+struct Arena {
+  struct Block {
+    Block* next = nullptr;
+    u32 used = 0;
+    char data[1 << 16]{};
+  };
+  Block* head = nullptr;
+
+  char* alloc(u32 n) {
+    if (!head || head->used + n > sizeof(head->data)) {
+      Block* b = new Block;
+      b->next = head;
+      head = b;
+    }
+    char* p = head->data + head->used;
+    head->used += n;
+    return p;
+  }
 };
 
 struct Names {
-  atomic<u16> tags[kSlots];
   Slot slots[kSlots];
   atomic<u32> next{0};
 
   Names() {
-    for (auto& t : tags) t.store(0, memory_order_relaxed);
+    for (auto& sl : slots) sl.state.store(0, memory_order_relaxed);
   }
 
   static u32 mix(const char* s, u32 n) {
@@ -189,47 +211,55 @@ struct Names {
       memcpy(&v, s + i, n - i);
       h = _mm_crc32_u64(h, v);
     }
+    if ((u32)h < 2) h += 2;
     return (u32)h;
   }
 
+  static u32 slot_len(const Slot& sl) { return sl.meta >> 18; }
+  static u32 slot_id(const Slot& sl) { return sl.meta & ((1u << 18) - 1); }
+
   static bool eq(const Slot& sl, const char* s, u32 n) {
-    if (sl.len != n) return false;
-    if (n <= 24) return n == 0 || memcmp(sl.name, s, n) == 0;
-    return memcmp(sl.name, s, 24) == 0 && memcmp(sl.extra, s + 24, n - 24) == 0;
+    if (slot_len(sl) != n) return false;
+    if (n <= 16) return n == 0 || memcmp(sl.bytes, s, n) == 0;
+    const char* stored;
+    memcpy(&stored, sl.bytes, sizeof(stored));
+    return memcmp(stored, s, n) == 0;
   }
 
-  u32 intern(const char* s, u32 n, u32 h) {
-    u16 tag = (u16)(h >> 16);
-    if (tag < 2) tag = (u16)(tag + 2);
+  static void keep(Slot& sl, const char* s, u32 n, u32 id, Arena& arena) {
+    sl.meta = id | (n << 18);
+    if (n <= 16) {
+      if (n) memcpy(sl.bytes, s, n);
+      return;
+    }
+    char* copy = arena.alloc(n);
+    memcpy(copy, s, n);
+    memcpy(sl.bytes, &copy, sizeof(copy));
+  }
+
+  u32 intern(const char* s, u32 n, u32 h, Arena& arena) {
     u32 i = h & kMask;
+    u32 advanced = 0;
     for (;;) {
-      u16 t = tags[i].load(memory_order_acquire);
-      if (t == tag) {
-        if (eq(slots[i], s, n)) return slots[i].id;
-      } else if (t == 0) {
-        u16 exp = 0;
-        if (tags[i].compare_exchange_weak(exp, kBusy, memory_order_acq_rel)) {
+      u32 st = slots[i].state.load(memory_order_acquire);
+      if (st == h) {
+        if (eq(slots[i], s, n)) return slot_id(slots[i]);
+      } else if (st == 0) {
+        u32 exp = 0;
+        if (slots[i].state.compare_exchange_weak(exp, kBusy, memory_order_acq_rel)) {
           u32 id = next.fetch_add(1, memory_order_relaxed);
           if (id >= kMaxNames) die("name table full");
-          Slot& sl = slots[i];
-          sl.len = n;
-          sl.id = id;
-          u32 head_n = n < 24 ? n : 24;
-          if (head_n) memcpy(sl.name, s, head_n);
-          if (n > 24) {
-            char* buf = new char[n - 24];
-            memcpy(buf, s + 24, n - 24);
-            sl.extra = buf;
-          }
-          tags[i].store(tag, memory_order_release);
+          keep(slots[i], s, n, id, arena);
+          slots[i].state.store(h, memory_order_release);
           return id;
         }
         continue;
-      } else if (t == kBusy) {
+      } else if (st == kBusy) {
         _mm_pause();
         continue;
       }
       i = (i + 1) & kMask;
+      if (++advanced >= kSlots) die("name table full");
     }
   }
 };
@@ -425,19 +455,23 @@ int main() {
   }
 
   vector<vector<Agg>> ags((size_t)T, vector<Agg>(countries));
-  Names* names = new Names;
+  // Private bitsets were larger and slower at every thread count tried.
+  // One shared row set stays in cache; the or is relaxed.
   vector<u64> bits(countries * kWords);
+  vector<Arena> arenas((size_t)T);
+  Names* names = new Names;
   vector<thread> pool;
   for (int t = 0; t < T; ++t) {
     pool.emplace_back([&, t] {
       vector<Agg>& ag = ags[t];
+      Arena& arena = arenas[t];
       Pend ring[kRing];
       int head = 0, filled = 0;
       auto drain_one = [&] {
         Pend e = ring[head];
         head = (head + 1) & (kRing - 1);
         --filled;
-        u32 id = names->intern(e.s, e.n, e.h);
+        u32 id = names->intern(e.s, e.n, e.h, arena);
         mark_name(bits.data(), e.country, id);
       };
       const char* q = starts[t];
@@ -455,8 +489,7 @@ int main() {
         a.name_bytes += v.name_un;
         a.note_bytes += v.note_un;
         u32 h = Names::mix(v.name, v.name_raw);
-        _mm_prefetch(names->tags + (h & kMask), _MM_HINT_T0);
-        _mm_prefetch(names->slots + (h & kMask), _MM_HINT_T0);
+        _mm_prefetch(&names->slots[h & kMask], _MM_HINT_T0);
         if (filled == kRing) drain_one();
         ring[(head + filled) & (kRing - 1)] = Pend{cid, v.name, v.name_raw, h};
         ++filled;
@@ -466,6 +499,7 @@ int main() {
     });
   }
   for (auto& th : pool) th.join();
+  delete names;
 
   vector<u32> distinct(countries);
   for (size_t c = 0; c < countries; ++c) distinct[c] = popcount_row(bits.data() + c * kWords);
