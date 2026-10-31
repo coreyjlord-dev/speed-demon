@@ -164,13 +164,13 @@ inline u64 parse_digits(const char* s, const char* e) {
 }
 
 // Open-addressed slot. state is the hash (never 0 or 1), 1 while claimed.
-// Up to 16 name bytes sit in the slot. Longer names are one arena pointer.
+// Eight name bytes sit in the slot. Longer names are one arena pointer.
 struct Slot {
   atomic<u32> state;
   u32 meta;
-  char bytes[16];
+  char bytes[8];
 };
-static_assert(sizeof(Slot) == 24, "name slot");
+static_assert(sizeof(Slot) == 16, "name slot");
 
 struct Arena {
   struct Block {
@@ -205,7 +205,7 @@ struct Names {
 
   static bool eq(const Slot& sl, const char* s, u32 n) {
     if (slot_len(sl) != n) return false;
-    if (n <= 16) return n == 0 || memcmp(sl.bytes, s, n) == 0;
+    if (n <= 8) return n == 0 || memcmp(sl.bytes, s, n) == 0;
     const char* stored;
     memcpy(&stored, sl.bytes, sizeof(stored));
     return memcmp(stored, s, n) == 0;
@@ -213,7 +213,7 @@ struct Names {
 
   static void keep(Slot& sl, const char* s, u32 n, u32 id, Arena& arena) {
     sl.meta = id | (n << 18);
-    if (n <= 16) {
+    if (n <= 8) {
       if (n) memcpy(sl.bytes, s, n);
       return;
     }
