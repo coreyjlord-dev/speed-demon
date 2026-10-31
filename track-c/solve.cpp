@@ -1,6 +1,6 @@
 // Track C. One parallel parse, one shared name table, one country bitset.
-// Quoted fields are scanned 32 bytes at a time. The bit word is prefetched
-// when the name id is known. A relaxed load skips an or if that bit is set.
+// Quoted fields are scanned 32 bytes at a time. Distinct names are marked
+// with a relaxed atomic or, so the per-record id lists are not stored.
 
 #include <algorithm>
 #include <atomic>
@@ -434,17 +434,9 @@ u32 popcount_row(const u64* b) {
   return n;
 }
 
-// A mark sits in this queue long enough for its prefetch to land.
-constexpr int kDue = 8;
-
-struct Due {
-  u64* word;
-  u64 mask;
-};
-
-void apply_mark(Due d) {
-  u64 cur = __atomic_load_n(d.word, __ATOMIC_RELAXED);
-  if ((cur & d.mask) == 0) __atomic_fetch_or(d.word, d.mask, __ATOMIC_RELAXED);
+void mark_name(u64* bits, u32 country, u32 id) {
+  u64* word = bits + (size_t)country * kWords + (id >> 6);
+  __atomic_fetch_or(word, 1ull << (id & 63), __ATOMIC_RELAXED);
 }
 
 struct Pend {
@@ -497,25 +489,12 @@ int main() {
       Arena& arena = arenas[t];
       Pend ring[kRing];
       int head = 0, filled = 0;
-      Due due[kDue];
-      int due_head = 0, due_n = 0;
-      auto flush_due = [&] {
-        apply_mark(due[due_head]);
-        due_head = (due_head + 1) & (kDue - 1);
-        --due_n;
-      };
-      auto push_due = [&](u32 country, u32 id) {
-        u64* word = bits.data() + (size_t)country * kWords + (id >> 6);
-        _mm_prefetch(word, _MM_HINT_T0);
-        if (due_n == kDue) flush_due();
-        due[(due_head + due_n) & (kDue - 1)] = Due{word, 1ull << (id & 63)};
-        ++due_n;
-      };
       auto drain_one = [&] {
         Pend e = ring[head];
         head = (head + 1) & (kRing - 1);
         --filled;
-        push_due(e.country, names->intern(e.s, e.n, e.h, arena));
+        u32 id = names->intern(e.s, e.n, e.h, arena);
+        mark_name(bits.data(), e.country, id);
       };
       const char* q = starts[t];
       const char* limit = starts[t + 1];
@@ -539,7 +518,6 @@ int main() {
         q = v.next;
       }
       while (filled) drain_one();
-      while (due_n) flush_due();
     });
   }
   for (auto& th : pool) th.join();
