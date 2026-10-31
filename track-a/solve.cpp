@@ -200,7 +200,8 @@ void isort(u32 *a, u32 n) {
 }
 
 // Groups of 64 or fewer are insertion-sorted. Larger groups get an 8-bit radix
-// sort; the three nearest ranks are then read directly.
+// sort that stops once the remaining high bytes are zero. The three nearest
+// ranks are then read directly.
 void select3(u32 *a, u32 n, u32 &a50, u32 &a95, u32 &a99) {
   u32 i50 = (u32)((50ull * n + 99) / 100 - 1);
   u32 i95 = (u32)((95ull * n + 99) / 100 - 1);
@@ -212,13 +213,25 @@ void select3(u32 *a, u32 n, u32 &a50, u32 &a95, u32 &a99) {
     if (scratch.size() < n)
       scratch.resize(n);
     u32 *src = a, *dst = scratch.data();
+    // OR of the values names the highest live byte. A group whose latencies
+    // fit in one, two, or three bytes stops after that many passes.
+    u32 bits = 0;
     for (int shift = 0; shift < 32; shift += 8) {
+      if (shift && (bits >> shift) == 0)
+        break;
       u32 bucket[256] = {};
-      for (u32 i = 0; i < n; ++i)
-        bucket[(src[i] >> shift) & 255]++;
-      u32 sum = 0, count = 0;
-      for (int i = 0; i < 256; ++i)
-        count = bucket[i], bucket[i] = sum, sum += count;
+      for (u32 i = 0; i < n; ++i) {
+        u32 v = src[i];
+        bucket[(v >> shift) & 255]++;
+        if (shift == 0)
+          bits |= v;
+      }
+      u32 sum = 0;
+      for (int i = 0; i < 256; ++i) {
+        u32 count = bucket[i];
+        bucket[i] = sum;
+        sum += count;
+      }
       for (u32 i = 0; i < n; ++i)
         dst[bucket[(src[i] >> shift) & 255]++] = src[i];
       std::swap(src, dst);
