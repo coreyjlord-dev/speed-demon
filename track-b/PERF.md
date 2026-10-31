@@ -13,3 +13,4 @@ Local numbers are a warm run on this 4-core VM. They are not board scores. M is 
 | 6 | Same program, packed so clang-format LLVM counts 211 lines instead of 702. Paired wall and cgroup memory.peak match step 5 | local | 0.434 | 70 | |
 | 7 | Start-bit token walk. Single-thread tokenize 158 ms to 113 ms. Board candidate: the 4-core VM at 12 threads only moved a few milliseconds. scc 211. Hashes match step 6 | local | | | |
 | 8 | Readable rewrite. Ordinary control flow, no clang-format guard. scc 1072. Paired 12-thread median 436 ms vs 445 ms for step 7, memory.peak about 78 MB. Estimated 59.0 vs 64.2 | local | 0.436 | 78 | 59.0 |
+| 9 | AND, OR, and NOT share one list merge. Queries share one term reader. scc 1055. Paired 12-thread median 435 ms vs 433 ms for step 8, memory.peak about 78 MB. Estimated 59.1 | local | 0.435 | 78 | 59.1 |

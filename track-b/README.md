@@ -12,4 +12,4 @@ None. Static C++20.
 
 ## With another 24 hours
 
-The scan is still most of the run. Term lookup hits a 1 MB table, skips a token already recorded in the current document, and folds the key with one multiply. Bitmap updates are plain ors. Formatted source is 1072 lines of ordinary C++. The tokenizer walks token starts instead of every mask bit. What is left is the query phase, about 130 ms, and the anonymous scan peak from the 3-byte log. The record on the board is about 0.29 s and 70 MB.
+The scan is still most of the run. Term lookup hits a 1 MB table, skips a token already recorded in the current document, and folds the key with one multiply. Bitmap updates are plain ors. Formatted source is 1055 lines of ordinary C++. AND, OR, and NOT share one list merge. The tokenizer walks token starts instead of every mask bit. What is left is the query phase, about 130 ms, and the anonymous scan peak from the 3-byte log. The record on the board is about 0.29 s and 70 MB.
