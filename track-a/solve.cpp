@@ -1,6 +1,5 @@
-// Track A: tail scan, 4-byte hour records, 8192-record blocks, radix select,
-// writer thread. Nearest rank is (p * n + 99) / 100 - 1. A 5xx is status[0] ==
-// '5'.
+// Track A: tail scan, 4-byte hour records, 8192-record blocks, radix select.
+// Nearest rank is (p * n + 99) / 100 - 1. A 5xx is status[0] == '5'.
 
 #include <algorithm>
 #include <atomic>
@@ -135,10 +134,12 @@ static constexpr Div kDiv[9] = {
     u64 v;
     memcpy(&v, d, 8);
     v &= (k == 8 ? ~0ull : (1ull << (k * 8)) - 1ull) & 0x0F0F0F0F0F0F0F0Full;
-    u32 x = 0;
-    for (int i = 0; i < 8; ++i)
-      x = x * 10u + (u32)((v >> (8 * i)) & 255u);
-    return (u32)((x * kDiv[k].m) >> kDiv[k].s);
+    // Bytes past k are zero, so this is the latency times 10^(8-k). The
+    // three multiplies fold eight digits in parallel; kDiv undoes the pad.
+    v = (v * 2561ull) >> 8;
+    v = ((v & 0x00FF00FF00FF00FFull) * 6553601ull) >> 16;
+    v = ((v & 0x0000FFFF0000FFFFull) * 42949672960001ull) >> 32;
+    return (u32)((v * kDiv[k].m) >> kDiv[k].s);
   }
   u32 x = 0;
   for (int i = 0; i < k; ++i)
@@ -198,7 +199,8 @@ void isort(u32 *a, u32 n) {
 }
 
 // Groups of 64 or fewer are insertion-sorted. Larger groups get an 8-bit radix
-// sort; the three nearest ranks are then read directly.
+// sort that stops once the remaining high bytes are zero. The three nearest
+// ranks are then read directly.
 void select3(u32 *a, u32 n, u32 &a50, u32 &a95, u32 &a99) {
   u32 i50 = (u32)((50ull * n + 99) / 100 - 1);
   u32 i95 = (u32)((95ull * n + 99) / 100 - 1);
@@ -210,13 +212,25 @@ void select3(u32 *a, u32 n, u32 &a50, u32 &a95, u32 &a99) {
     if (scratch.size() < n)
       scratch.resize(n);
     u32 *src = a, *dst = scratch.data();
+    // OR of the values names the highest live byte. A group whose latencies
+    // fit in one, two, or three bytes stops after that many passes.
+    u32 bits = 0;
     for (int shift = 0; shift < 32; shift += 8) {
+      if (shift && (bits >> shift) == 0)
+        break;
       u32 bucket[256] = {};
-      for (u32 i = 0; i < n; ++i)
-        bucket[(src[i] >> shift) & 255]++;
-      u32 sum = 0, count = 0;
-      for (int i = 0; i < 256; ++i)
-        count = bucket[i], bucket[i] = sum, sum += count;
+      for (u32 i = 0; i < n; ++i) {
+        u32 v = src[i];
+        bucket[(v >> shift) & 255]++;
+        if (shift == 0)
+          bits |= v;
+      }
+      u32 sum = 0;
+      for (int i = 0; i < 256; ++i) {
+        u32 count = bucket[i];
+        bucket[i] = sum;
+        sum += count;
+      }
       for (u32 i = 0; i < n; ++i)
         dst[bucket[(src[i] >> shift) & 255]++] = src[i];
       std::swap(src, dst);
@@ -237,11 +251,6 @@ void select3(u32 *a, u32 n, u32 &a50, u32 &a95, u32 &a99) {
     *o++ = t[n];
   return o;
 }
-
-struct Piece {
-  std::string text;
-  std::atomic<int> ready{0};
-};
 
 template <class F> void run(int n, F fn) {
   std::vector<std::thread> pool;
@@ -325,17 +334,9 @@ int main() {
     snprintf(hours[i], 21, "%04d-%02d-%02dT%02d:00:00Z", 2026, month, dom, hr);
   }
 
-  Piece piece[kH];
-  std::thread writer([&] {
-    for (int h = 0; h < kH; ++h) {
-      while (!piece[h].ready.load(std::memory_order_acquire))
-        _mm_pause();
-      !piece[h].text.empty() &&
-          fwrite(piece[h].text.data(), 1, piece[h].text.size(), fp);
-      std::string().swap(piece[h].text);
-    }
-  });
-
+  // The worker that finishes hour h waits, then writes it. Hours stay in
+  // order, and no extra thread sits on a core spinning for the next buffer.
+  std::atomic<int> turn{0};
   std::atomic<int> next{0};
   int ht = T < kH ? T : kH;
   run(ht, [&](int) {
@@ -375,10 +376,13 @@ int main() {
       }
       for (int w = 0; w < T; ++w)
         ws[w].hour[h].clear();
-      piece[h].text = std::move(text),
-      piece[h].ready.store(1, std::memory_order_release);
+      while (turn.load(std::memory_order_acquire) != h)
+        std::this_thread::yield();
+      if (!text.empty())
+        fwrite(text.data(), 1, text.size(), fp);
+      turn.store(h + 1, std::memory_order_release);
     }
   });
-  writer.join(), fclose(fp), malloc_trim(0);
+  fclose(fp), malloc_trim(0);
   return 0;
 }
