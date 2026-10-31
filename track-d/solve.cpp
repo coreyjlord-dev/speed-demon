@@ -213,17 +213,26 @@ struct Pending {
   u32 vertex;
 };
 
-// Circular bucket queue. Long jumps live in the side heap.
+// One pool of bucket links. A vertex may sit in several buckets; stale
+// entries are skipped when they are popped.
 struct Dial {
-  std::vector<u32> bin[kDial];
+  struct Node {
+    u32 vertex;
+    u32 next;
+  };
+  std::vector<Node> pool;
+  u32 head[kDial];
   std::vector<int> touched;
   std::vector<Pending> far;
   u64 cur = 0;
 
+  Dial() { std::fill(head, head + kDial, ~0u); }
+
   void clear() {
     for (int index : touched)
-      bin[index].clear();
+      head[index] = ~0u;
     touched.clear();
+    pool.clear();
     far.clear();
     cur = 0;
   }
@@ -234,9 +243,19 @@ struct Dial {
       return;
     }
     u32 index = (u32)distance & (kDial - 1);
-    if (bin[index].empty())
+    if (head[index] == ~0u)
       touched.push_back((int)index);
-    bin[index].push_back(vertex);
+    pool.push_back({vertex, head[index]});
+    head[index] = (u32)pool.size() - 1;
+  }
+
+  bool pop(u32 index, u32 &vertex) {
+    u32 slot = head[index];
+    if (slot == ~0u)
+      return false;
+    vertex = pool[slot].vertex;
+    head[index] = pool[slot].next;
+    return true;
   }
 
   bool take_far(u64 &distance, u32 &vertex) {
@@ -288,27 +307,25 @@ int64_t dijkstra(const Graph &graph, DistanceStore &dist, Dial &queue,
     relax(u);
     return 0;
   };
-  auto &bin = queue.bin;
   while (true) {
     u32 index = (u32)queue.cur & (kDial - 1);
-    if (bin[index].empty()) {
+    u32 vertex;
+    if (!queue.pop(index, vertex)) {
       u32 step = 1;
-      while (step < kDial && bin[(queue.cur + step) & (kDial - 1)].empty())
+      while (step < kDial &&
+             queue.head[(queue.cur + step) & (kDial - 1)] == ~0u)
         ++step;
       if (step < kDial) {
         queue.cur += step;
         continue;
       }
       u64 far;
-      u32 vertex;
       if (!queue.take_far(far, vertex))
         return -1;
       if (settle(vertex, far))
         return (int64_t)queue.cur;
       continue;
     }
-    u32 vertex = bin[index].back();
-    bin[index].pop_back();
     if (settle(vertex, queue.cur))
       return (int64_t)queue.cur;
   }
