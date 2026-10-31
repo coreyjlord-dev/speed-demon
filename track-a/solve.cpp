@@ -135,10 +135,12 @@ static constexpr Div kDiv[9] = {
     u64 v;
     memcpy(&v, d, 8);
     v &= (k == 8 ? ~0ull : (1ull << (k * 8)) - 1ull) & 0x0F0F0F0F0F0F0F0Full;
-    u32 x = 0;
-    for (int i = 0; i < 8; ++i)
-      x = x * 10u + (u32)((v >> (8 * i)) & 255u);
-    return (u32)((x * kDiv[k].m) >> kDiv[k].s);
+    // Bytes past k are zero, so this is the latency times 10^(8-k). The
+    // three multiplies fold eight digits in parallel; kDiv undoes the pad.
+    v = (v * 2561ull) >> 8;
+    v = ((v & 0x00FF00FF00FF00FFull) * 6553601ull) >> 16;
+    v = ((v & 0x0000FFFF0000FFFFull) * 42949672960001ull) >> 32;
+    return (u32)((v * kDiv[k].m) >> kDiv[k].s);
   }
   u32 x = 0;
   for (int i = 0; i < k; ++i)
