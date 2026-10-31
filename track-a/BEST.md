@@ -21,10 +21,13 @@ The number that must not regress is the board wall time. A later push has to bea
 | 14 | 2026-10-30 | local | 59.4 ms | 18 MB | | | 4-byte records, overflow list, no arena cap. Paired with a8d69d8: 59.4 vs 59.5 ms, RSS 18 vs 22. 12 threads 77.8 vs 77.0 ms. Formatted scc still 287. Est. +1.06 points from memory |
 | 15 | 2026-10-30 | local | 55.5 ms | 18 MB | | | 8192-record blocks and radix select for groups above 64. Paired with b951722: 55.5 vs 58.8 ms, RSS 17–18 both. 12 threads 73.9 vs 84.3 ms. Formatted scc 283. Est. +0.67 points in-session. Held: it used clang-format off |
 | 16 | 2026-10-30 | local | 52.7 ms | 18 MB | 75.31 | | Readable rebuild on b951722. No formatter off region, max line 79. Paired 52.7 vs 54.9 ms, RSS 17–18 both. clang-format then scc: S=351. Est. 75.31 vs board 75.447 at S=294 |
+| 17 | 2026-10-31 | local | 51.9 ms | 18 MB | 75.49 | | Parallel 8-digit latency parse plus radix that stops on a zero high byte. Paired against the readable build, 15 alternating runs: avg 51.9 vs 55.5 ms, median 52 vs 55, RSS 17–18. All seven fixture hashes match. clang-format scc 361. Board S estimated 368. |
 
-Board rejected 59410ea. The local floor is 5f407db until the line cut below.
+Board score of the readable build is 74.853 (41.3 ms, 31 MB, S=358). Row 17 scales that time by the local ratio and keeps 31 MB.
 
 READABLE-WIN: 4d7b815 S=351 est 75.31
+
+VERIFIED-WIN: a1a63a0 est 75.49
 
 VERIFIED-WIN: f5259ea local T=55.5 RSS=18 src=11081
 

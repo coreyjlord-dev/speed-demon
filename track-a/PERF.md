@@ -19,3 +19,4 @@ Local numbers are a warm run on this 4-core VM, input already in the page cache.
 | 12 | 4-byte hour records, large latencies in a side list, arenas uncapped, 287 lines | local static | 0.059 | 18 | |
 | 13 | 8192-record blocks, radix select above 64, 283 lines, clang-format off | local static | 0.056 | 18 | |
 | 14 | Same blocks and radix, normal LLVM formatting, scc 351, no off region | local static | 0.053 | 18 | 75.31 |
+| 15 | Parallel 8-digit latency parse; radix stops after the last live byte. scc 361 | local static | 0.052 | 18 | 75.49 |
