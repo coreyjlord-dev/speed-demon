@@ -165,26 +165,39 @@ static constexpr Div kDiv[9] = {
 void parse_slice(Worker &w, const char *base, size_t begin, size_t end,
                  size_t flen) {
   const char *lim = base + flen;
-  const char *line = base + begin, *e = base + end, *p = line;
+  const char *line = base + begin, *e = base + end;
   const __m256i nlv = _mm256_set1_epi8('\n');
   size_t dropped = begin;
-  while (p + 32 <= e) {
-    u32 m = (u32)_mm256_movemask_epi8(
-        _mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i *)p), nlv));
-    while (m) {
-      const char *nl = p + __builtin_ctz(m);
-      take(w, line, nl, lim), line = nl + 1, m &= m - 1;
-    }
-    p += 32;
-    size_t at = (size_t)(line - base);
-    at > dropped + (1u << 20) &&
-        (drop_pages(base, dropped, at - 4096), dropped = at - 4096, 0);
-  }
+  // Fixed 27-byte timestamp plus the shortest method, path, status, and
+  // latency is 39 bytes, so the newline search starts there.
   while (line < e) {
-    const char *nl = line;
-    while (nl < e && *nl != '\n')
-      ++nl;
-    nl < e ? (take(w, line, nl, lim), line = nl + 1) : (line = e);
+    const char *p = line + 39 < e ? line + 39 : line;
+    const char *nl = nullptr;
+    if (p + 64 <= e) {
+      _mm_prefetch(p + 192, _MM_HINT_T0);
+      __m256i lo =
+          _mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i *)p), nlv);
+      __m256i hi =
+          _mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i *)(p + 32)), nlv);
+      u64 m = (u32)_mm256_movemask_epi8(lo) |
+              ((u64)(u32)_mm256_movemask_epi8(hi) << 32);
+      if (m)
+        nl = p + __builtin_ctzll(m);
+      else
+        p += 64;
+    }
+    if (!nl) {
+      while (p < e && *p != '\n')
+        ++p;
+      if (p >= e)
+        break;
+      nl = p;
+    }
+    take(w, line, nl, lim);
+    line = nl + 1;
+    size_t at = (size_t)(line - base);
+    if (at > dropped + (1u << 20))
+      drop_pages(base, dropped, at - 4096), dropped = at - 4096;
   }
   drop_pages(base, dropped, end);
 }
