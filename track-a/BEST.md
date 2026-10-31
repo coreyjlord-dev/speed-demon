@@ -24,6 +24,8 @@ The number that must not regress is the board wall time. A later push has to bea
 | 16 | 2026-10-30 | run-69f35e2575d7 | 43.757 ms | 33,325,056 B | 74.569 | | commit 89b9471. S=294. Above 74.435. Floor for the 4-byte record push. |
 | 17 | 2026-10-30 | run-363f38e17125 | 42.033 ms | 30,101,504 B | 75.447 | | b951722 on 5966b54. S=294. |
 | local | 2026-10-30 | | 57 ms | | | | READABLE-WIN 4d7b815. No clang-format off, longest line under 80. Integrator recheck: full-seed sha256 matches, tiny matches, warm 57 ms. |
+| 18 | 2026-10-31 | run-a84b305c176e | 43.547 ms | 30,322,688 B | 74.389 | | commit 76a41cc. S=358. |
+| 19 | 2026-10-31 | run-86ab7d2bf690 | 41.342 ms | 31,031,296 B | 74.853 | | same readable binary, re-scored on 7e5f9be. S=358. This is the floor. |
 
 VERIFIED-WIN: 59410ea local T=58.4 RSS=17.5 src=432 lines
 VERIFIED-WIN: e66eb72 local T=53.5 RSS=22.9 src=399 lines

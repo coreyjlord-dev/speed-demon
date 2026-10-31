@@ -29,4 +29,5 @@ VERIFIED-WIN: acb4383 local T=614 RSS=79 src=582
 | local | 2026-10-30 | | 562 ms | | | | VERIFIED-WIN 42c54bd. Integrator recheck: full-seed sha256 matches, tiny matches. This 4-core VM does not show the 12-thread query cap. |
 | 12 | 2026-10-30 | run-862c09bafae5 | 526.757 ms | 85,336,064 B | 57.488 | | commit e48c45c. S=289. Below the 61.542 floor. Reverted to aaf13d1. |
 | local | 2026-10-30 | | 497 ms | | | | VERIFIED-WIN 6eed07d. Integrator recheck: full-seed sha256 matches, tiny matches, warm 0.497 s on 4 cores (reported 0.465 s / 65 MiB at 12 threads). |
-| 13 | 2026-10-30 | run-177ddcf318b6 | 333.666 ms | 69,804,032 B | 63.363 | 15 of 57 | commit 069146c. Points rank 6 of 57. S=285. This is the floor. |
+| 13 | 2026-10-30 | run-177ddcf318b6 | 333.666 ms | 69,804,032 B | 63.363 | 15 of 57 | commit 069146c. Points rank 6 of 57. S=285. |
+| 14 | 2026-10-31 | run-c182a2b94418 | 342.617 ms | 69,722,112 B | 60.386 | | READABLE-WIN ebda02e on 7e5f9be. S=652. This is the floor. |

@@ -24,4 +24,4 @@ Best-3 geometric mean of points: **66.32** (A, D, B).
 
 Reference anchors: A 32.047 s / 228 MB / S 56, B 56.35 s / 2200 MB / S 91, C 14.44 s / 367 MB / S 108, D 72.69 s / 893 MB / S 43.
 
-B stays on `c6c556a` at 67.428 (`6a00c43`, 330.231 ms, S=210). This push is A's readable rebuild `4d7b815`. Its board score becomes A's floor even if it is under 75.447. C 62.969 and D 63.566 stay.
+Readable floors, kept even though the board's points-best is still the older packed run: A 74.853 (`7e5f9be`, 41.342 ms, S=358), B 67.428 (`6a00c43`, 330.231 ms, S=210, `c6c556a`), C 62.969 (`3143e3a`), D 60.386 (`7e5f9be`, 342.617 ms, S=652).
