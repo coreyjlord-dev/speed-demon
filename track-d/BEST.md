@@ -11,7 +11,7 @@ READABLE-WIN: 30f5ece S=624 est=61.73
 HONEST-S: 6eed07d guarded scc 278 is invalid. Formatter-stable S=603. At 331 ms and 69 MB that is 61.06, not 63.57.
 READABLE-WIN: 4397e52 S=564 est=62.91. One SWAR scanner for header, edges, and queries. Degree 65535 fallbacks removed (max degree on all seven sets is 10). Heavy weights are a sorted table. 4-thread median ties 66ab391; cgroup peak about 59.6 MiB either way.
 BOARD 20:32 UTC: Track D leader Cause Of Death run-fd84bc908d3e, T=0.121622 s, M=67579904, S=442, 73.032. Gigatron kept best run-941d46f514cc, 63.566. Latest speed-demon run-7f27942327c1, T=0.400902 s, M=72081408, S=656, 58.515.
-LOCAL: prefetch of the neighbor distance line and edge row, median 0.412 s vs 0.428 s, S=568. Not a board win.
+LOCAL: balanced bidirectional search, median 0.327 s vs 0.412 s one-way, 3581 settles per query, cgroup 66 MiB, S=672. Hashes match. Not yet a board score.
 VERIFIED-WIN: aaf13d1 local T=520 RSS=79 src=318
 VERIFIED-WIN: acb4383 local T=614 RSS=79 src=582
 

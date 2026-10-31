@@ -127,7 +127,10 @@ struct Graph {
   u32 *offset = nullptr;
   u32 *packed = nullptr;
   u32 *incoming = nullptr;
+  u32 *rev_offset = nullptr;
+  u32 *rev_packed = nullptr;
   Heavy heavy;
+  Heavy rev_heavy;
 
   bool has_incoming(u32 vertex) const {
     return (incoming[vertex >> 5] >> (vertex & 31)) & 1u;
@@ -253,22 +256,21 @@ struct Dial {
   }
 };
 
-int64_t dijkstra(const Graph &graph, DistanceStore &dist, Dial &queue,
-                 u32 source, u32 target) {
-  if (source == target)
-    return 0;
-  const u32 *offset = graph.offset;
-  const u32 *packed = graph.packed;
-  if (offset[source] == offset[source + 1] || !graph.has_incoming(target))
-    return -1;
-  dist.reset();
-  queue.clear();
-  dist.at(source) = 0;
-  queue.push(0, source);
+// Settled distances use the low bit. Unseen slots stay all-ones from the page
+// fill.
+u64 settled_on(const DistanceStore &store, u32 vertex) {
+  u64 *chunk = store.page[vertex >> 9];
+  if (!chunk)
+    return ~0ull;
+  u64 slot = chunk[vertex & 511];
+  if (slot == ~0ull || !(slot & 1ull))
+    return ~0ull;
+  return slot >> 1;
+}
+
+bool next_labeled(Dial &queue, DistanceStore &dist, u32 &vertex, u64 &cand) {
   while (true) {
     u32 index = (u32)queue.cur & (kDial - 1);
-    u32 vertex;
-    u64 cand;
     if (!queue.pop(index, vertex)) {
       u32 step = 1;
       while (step < kDial &&
@@ -279,31 +281,138 @@ int64_t dijkstra(const Graph &graph, DistanceStore &dist, Dial &queue,
         continue;
       }
       if (!queue.take_far(cand, vertex))
-        return -1;
+        return false;
     } else {
       cand = queue.cur;
     }
-    if (dist.at(vertex) != cand)
+    u64 slot = dist.at(vertex);
+    if (slot == ~0ull || (slot >> 1) != cand || (slot & 1ull))
       continue;
     queue.cur = cand;
-    if (vertex == target)
-      return (int64_t)cand;
-    for (u32 edge = offset[vertex]; edge < offset[vertex + 1]; ++edge) {
-      u32 code = packed[edge];
-      u32 head = code & kHeadMask;
-      // The neighbor is the next cache miss: its distance line, then its edges.
-      u64 *chunk = dist.page[head >> 9];
-      if (chunk)
-        __builtin_prefetch(chunk + (head & 511));
-      __builtin_prefetch(packed + offset[head]);
-      u64 next = cand + graph.weight_of(edge, code);
-      u64 &best = dist.at(head);
-      if (next < best) {
-        best = next;
-        queue.push(next, head);
-      }
+    return true;
+  }
+}
+
+void relax_side(const u32 *offset, const u32 *packed, const Heavy &table,
+                DistanceStore &mine, const DistanceStore &other, Dial &queue,
+                u32 vertex, u64 cand, u64 &best) {
+  mine.at(vertex) |= 1ull;
+  u64 back = settled_on(other, vertex);
+  if (back != ~0ull && cand + back < best)
+    best = cand + back;
+  u32 last = offset[vertex + 1];
+  for (u32 edge = offset[vertex]; edge < last; ++edge) {
+    u32 code = packed[edge];
+    u32 head = code & kHeadMask;
+    u64 *chunk = mine.page[head >> 9];
+    if (chunk)
+      __builtin_prefetch(chunk + (head & 511));
+    __builtin_prefetch(packed + offset[head]);
+    u32 weight = code >> kShift;
+    if (weight == kHeavy)
+      weight = table.get(edge);
+    u64 next = cand + weight;
+    if (next >= best)
+      continue;
+    u64 &slot = mine.at(head);
+    if (slot != ~0ull && (slot >> 1) <= next)
+      continue;
+    slot = next << 1;
+    queue.push(next, head);
+    u64 meet = settled_on(other, head);
+    if (meet != ~0ull && next + meet < best)
+      best = next + meet;
+  }
+}
+
+// Expand whichever side has settled fewer nodes. Stop when the two
+// frontiers can no longer beat the best meeting, or either side runs out.
+int64_t bidir(const Graph &graph, DistanceStore &forward,
+              DistanceStore &backward, Dial &front, Dial &back, u32 source,
+              u32 target) {
+  if (source == target)
+    return 0;
+  if (graph.offset[source] == graph.offset[source + 1] ||
+      !graph.has_incoming(target))
+    return -1;
+  forward.reset();
+  backward.reset();
+  front.clear();
+  back.clear();
+  forward.at(source) = 0;
+  backward.at(target) = 0;
+  front.push(0, source);
+  back.push(0, target);
+  u64 best = ~0ull;
+  u64 top_f = 0;
+  u64 top_b = 0;
+  u64 settled_f = 0;
+  u64 settled_b = 0;
+  bool alive_f = true;
+  bool alive_b = true;
+  while (alive_f && alive_b) {
+    if (best != ~0ull && top_f + top_b >= best)
+      break;
+    u32 vertex;
+    u64 cand;
+    if (settled_f <= settled_b) {
+      if (!next_labeled(front, forward, vertex, cand))
+        break;
+      top_f = cand;
+      ++settled_f;
+      relax_side(graph.offset, graph.packed, graph.heavy, forward, backward,
+                 front, vertex, cand, best);
+    } else {
+      if (!next_labeled(back, backward, vertex, cand))
+        break;
+      top_b = cand;
+      ++settled_b;
+      relax_side(graph.rev_offset, graph.rev_packed, graph.rev_heavy, backward,
+                 forward, back, vertex, cand, best);
     }
   }
+  return best == ~0ull ? -1 : (int64_t)best;
+}
+
+void build_reverse(Graph &graph, int workers) {
+  u32 nodes = graph.nodes;
+  u32 slots = graph.edge_count ? graph.edge_count : 1;
+  graph.rev_offset = alloc_array<u32>(nodes + 1);
+  memset(graph.rev_offset, 0, (nodes + 1ull) * 4);
+  auto *degree = (std::atomic<u32> *)graph.rev_offset;
+  parallel(workers, [&](int part) {
+    u32 begin = (u32)((u64)nodes * part / workers);
+    u32 end = (u32)((u64)nodes * (part + 1) / workers);
+    for (u32 vertex = begin; vertex < end; ++vertex) {
+      u32 last = graph.offset[vertex + 1];
+      for (u32 edge = graph.offset[vertex]; edge < last; ++edge)
+        degree[(graph.packed[edge] & kHeadMask) + 1].fetch_add(1, kRelaxed);
+    }
+  });
+  for (u32 vertex = 1; vertex <= nodes; ++vertex)
+    graph.rev_offset[vertex] += graph.rev_offset[vertex - 1];
+  u32 *cursor_raw = alloc_array<u32>(nodes);
+  memcpy(cursor_raw, graph.rev_offset, nodes * 4ull);
+  auto *cursor = (std::atomic<u32> *)cursor_raw;
+  graph.rev_packed = alloc_array<u32>(slots);
+  EdgeGroups parts(workers);
+  parallel(workers, [&](int part) {
+    Edges &mine = parts[part];
+    u32 begin = (u32)((u64)nodes * part / workers);
+    u32 end = (u32)((u64)nodes * (part + 1) / workers);
+    for (u32 vertex = begin; vertex < end; ++vertex) {
+      u32 last = graph.offset[vertex + 1];
+      for (u32 edge = graph.offset[vertex]; edge < last; ++edge) {
+        u32 code = graph.packed[edge];
+        u32 head = code & kHeadMask;
+        u32 weight = graph.weight_of(edge, code);
+        u32 index = cursor[head].fetch_add(1, kRelaxed);
+        graph.rev_packed[index] = pack_edge(vertex, weight, mine, index);
+      }
+    }
+  });
+  free_array(cursor_raw, nodes, 4);
+  graph.rev_heavy.absorb(parts);
 }
 
 // Eight decimal digits, little-endian, via SWAR.
@@ -548,6 +657,7 @@ void load(const char *path, Graph &graph, u32 *&id) {
   graph.offset = new_offset;
   graph.packed = new_packed;
   graph.heavy.absorb(remapped);
+  build_reverse(graph, workers);
 }
 
 void append_i64(char *&out, int64_t value) {
@@ -608,16 +718,17 @@ int main() {
   std::atomic<int> next{0};
   u32 chunks = (graph.nodes + kBlob - 1) / kBlob;
   parallel(workers, [&](int) {
-    DistanceStore distances;
-    distances.init(chunks);
-    Dial queue;
+    DistanceStore forward, backward;
+    forward.init(chunks);
+    backward.init(chunks);
+    Dial front, back;
     for (;;) {
       int job = next.fetch_add(1, kRelaxed);
       if (job >= query_count)
         break;
       int query = order[job];
-      answers[query] =
-          dijkstra(graph, distances, queue, sources[query], targets[query]);
+      answers[query] = bidir(graph, forward, backward, front, back,
+                             sources[query], targets[query]);
     }
   });
 
