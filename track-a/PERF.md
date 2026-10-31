@@ -19,4 +19,4 @@ Local numbers are a warm run on this 4-core VM, input already in the page cache.
 | 12 | 4-byte hour records, large latencies in a side list, arenas uncapped, 287 lines | local static | 0.059 | 18 | |
 | 13 | 8192-record blocks, radix select above 64, 283 lines, clang-format off | local static | 0.056 | 18 | |
 | 14 | Same blocks and radix, normal LLVM formatting, scc 351, no off region | local static | 0.053 | 18 | 75.31 |
-| 15 | Newline scan starts at byte 39: one 64-byte AVX2 compare and a prefetch. Local 4-thread median 49.7 vs 52.0 ms. `nth_element` was 57 ms and one buffered write was 63 ms, so those stayed local | run-3c6fb8614cf1 | 0.0379 | 29.3 | 75.73 |
+| 15 | Newline scan starts at byte 39: one 64-byte AVX2 compare and a prefetch. Local 4-thread median 49.7 vs 52.0 ms. `nth_element` was 57 ms and one buffered write was 63 ms, so those stayed local. Board kept the better of two runs of these sources | run-b3294a794f9f | 0.0378 | 28.8 | 75.83 |
