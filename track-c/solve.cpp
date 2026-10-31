@@ -198,23 +198,6 @@ struct Names {
     for (auto& sl : slots) sl.state.store(0, memory_order_relaxed);
   }
 
-  static u32 mix(const char* s, u32 n) {
-    u64 h = n;
-    u32 i = 0;
-    for (; i + 8 <= n; i += 8) {
-      u64 v;
-      memcpy(&v, s + i, 8);
-      h = _mm_crc32_u64(h, v);
-    }
-    if (i < n) {
-      u64 v = 0;
-      memcpy(&v, s + i, n - i);
-      h = _mm_crc32_u64(h, v);
-    }
-    if ((u32)h < 2) h += 2;
-    return (u32)h;
-  }
-
   static u32 slot_len(const Slot& sl) { return sl.meta >> 18; }
   static u32 slot_id(const Slot& sl) { return sl.meta & ((1u << 18) - 1); }
 
@@ -267,57 +250,85 @@ struct Names {
 struct View {
   const char* name = nullptr;
   u32 name_raw = 0, name_un = 0, note_un = 0, region = 0;
+  u32 name_hash = 0;
   u64 id = 0;
   int64_t cents = 0;
   const char* next = nullptr;
 };
 
-// Next quote or newline. One 32-byte compare covers a typical name.
-__attribute__((always_inline)) inline const char* scan_to_quote(const char* p, const char* end) {
-  const __m256i quotes = _mm256_set1_epi8('"');
-  const __m256i breaks = _mm256_set1_epi8('\n');
+inline u64 crc_span(u64 h, const char* s, const char* e) {
+  while (s + 8 <= e) {
+    u64 v;
+    memcpy(&v, s, 8);
+    h = _mm_crc32_u64(h, v);
+    s += 8;
+  }
+  if (s < e) {
+    u64 v = 0;
+    memcpy(&v, s, (size_t)(e - s));
+    h = _mm_crc32_u64(h, v);
+  }
+  return h;
+}
+
+inline u32 fold_hash(u64 h, u32 n) {
+  h = _mm_crc32_u64(h, n);
+  if ((u32)h < 2) h += 2;
+  return (u32)h;
+}
+
+// AVX2 step to the next quote. Notes also stop on a newline.
+inline const char* find_delim(const char* p, const char* end, bool notes) {
+  const __m256i quote = _mm256_set1_epi8('"');
+  const __m256i brk = _mm256_set1_epi8('\n');
   while (p + 32 <= end) {
     __m256i v = _mm256_loadu_si256((const __m256i*)p);
-    int q = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, quotes));
-    int n = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, breaks));
-    int m = q | n;
+    int mq = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, quote));
+    int mn = notes ? _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, brk)) : 0;
+    int m = mq | mn;
     if (m) return p + __builtin_ctz(m);
     p += 32;
   }
-  while (p < end && *p != '"' && *p != '\n') ++p;
+  while (p < end && *p != '"' && !(notes && *p == '\n')) ++p;
   return p;
 }
 
-// Field is either "raw" (with "" escapes) or bare text up to comma/newline.
-__attribute__((always_inline)) inline const char* read_field(const char* p, const char* end,
-                                                            const char*& raw, u32& raw_n, u32& un_n) {
-  if (p < end && *p == '"') {
-    ++p;
-    raw = p;
-    int esc = 0;
-    while (p < end) {
-      if (*p != '"' && *p != '\n') p = scan_to_quote(p, end);
-      if (p >= end) break;
-      if (*p == '\n') {
-        ++p;
-        continue;
-      }
-      if (p + 1 < end && p[1] == '"') {
-        ++esc;
-        p += 2;
-        continue;
-      }
-      raw_n = (u32)(p - raw);
-      un_n = raw_n - (u32)esc;
-      return p + 1;
+// Quoted field. Names are hashed in this same scan. "" is an escaped quote.
+inline const char* read_quoted(const char* p, const char* end, const char*& raw, u32& raw_n,
+                              u32& un_n, u32* hash_out) {
+  ++p;
+  raw = p;
+  u64 h = 0;
+  int esc = 0;
+  while (p < end) {
+    const char* d = find_delim(p, end, hash_out == nullptr);
+    if (hash_out) h = crc_span(h, p, d);
+    if (d >= end) break;
+    if (*d == '\n') {
+      p = d + 1;
+      continue;
     }
-    raw_n = (u32)(end - raw);
+    if (d + 1 < end && d[1] == '"') {
+      ++esc;
+      if (hash_out) h = crc_span(h, d, d + 2);
+      p = d + 2;
+      continue;
+    }
+    raw_n = (u32)(d - raw);
     un_n = raw_n - (u32)esc;
-    return end;
+    if (hash_out) *hash_out = fold_hash(h, raw_n);
+    return d + 1;
   }
+  raw_n = (u32)(end - raw);
+  un_n = raw_n - (u32)esc;
+  if (hash_out) *hash_out = fold_hash(h, raw_n);
+  return end;
+}
+
+inline const char* read_bare(const char* p, const char* end, const char*& raw, u32& n) {
   raw = p;
   while (p < end && *p != ',' && *p != '\n') ++p;
-  raw_n = un_n = (u32)(p - raw);
+  n = (u32)(p - raw);
   return p;
 }
 
@@ -335,18 +346,29 @@ inline int64_t parse_money(const char* s, const char* e) {
   return sign * ((int64_t)whole * 100 + frac);
 }
 
-__attribute__((always_inline)) inline View parse_record(const char* p, const char* end) {
+inline View parse_record(const char* p, const char* end) {
   View v;
   if (is_bom(p, end)) p += 3;
   const char* id_b = p;
   while (p < end && *p != ',') ++p;
   v.id = parse_digits(id_b, p);
   if (p < end) ++p;
+  if (p < end && *p == '"') {
+    p = read_quoted(p, end, v.name, v.name_raw, v.name_un, &v.name_hash);
+  } else {
+    p = read_bare(p, end, v.name, v.name_raw);
+    v.name_un = v.name_raw;
+    v.name_hash = fold_hash(crc_span(0, v.name, v.name + v.name_raw), v.name_raw);
+  }
+  if (p < end && *p == ',') ++p;
   u32 note_raw = 0;
   const char* note = nullptr;
-  p = read_field(p, end, v.name, v.name_raw, v.name_un);
-  if (p < end && *p == ',') ++p;
-  p = read_field(p, end, note, note_raw, v.note_un);
+  if (p < end && *p == '"') {
+    p = read_quoted(p, end, note, note_raw, v.note_un, nullptr);
+  } else {
+    p = read_bare(p, end, note, note_raw);
+    v.note_un = note_raw;
+  }
   if (p < end && *p == ',') ++p;
   const char* rb = p;
   while (p < end && *p != ',') ++p;
@@ -488,7 +510,7 @@ int main() {
         if (v.cents > a.amax) a.amax = v.cents;
         a.name_bytes += v.name_un;
         a.note_bytes += v.note_un;
-        u32 h = Names::mix(v.name, v.name_raw);
+        u32 h = v.name_hash;
         _mm_prefetch(&names->slots[h & kMask], _MM_HINT_T0);
         if (filled == kRing) drain_one();
         ring[(head + filled) & (kRing - 1)] = Pend{cid, v.name, v.name_raw, h};
