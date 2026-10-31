@@ -122,30 +122,19 @@ void load_regions(const Mapped& file, World& w) {
   const char* end = file.data + file.len;
   while (p < end && *p != '\n') ++p;
   if (p < end) ++p;
-  u32 max_id = 0;
-  struct Row {
-    u32 id;
-    char a, b, c;
-  };
-  vector<Row> rows;
-  rows.reserve(file.len / 10);
   while (p < end) {
     u32 id = 0;
-    while (p < end && *p >= '0' && *p <= '9') {
-      id = id * 10u + (u32)(*p - '0');
-      ++p;
-    }
+    while (p < end && *p >= '0' && *p <= '9') id = id * 10u + (u32)(*p++ - '0');
     if (p >= end || *p != ',') break;
     ++p;
-    char a = *p++;
-    char b = *p++;
-    char c = *p++;
+    char a = *p++, b = *p++, c = *p++;
+    if ((size_t)id >= w.region_country.size()) {
+      w.region_country.resize((size_t)id + 1, kNoCountry);
+    }
+    w.region_country[id] = (u8)w.country_of(a, b, c);
     if (p < end && *p == '\n') ++p;
-    rows.push_back({id, a, b, c});
-    if (id > max_id) max_id = id;
   }
-  w.region_country.assign((size_t)max_id + 1, kNoCountry);
-  for (const Row& r : rows) w.region_country[r.id] = (u8)w.country_of(r.a, r.b, r.c);
+  w.region_country.shrink_to_fit();
   w.unmatched = (u32)(w.codes.size() / 3);
 }
 
@@ -194,9 +183,7 @@ struct Names {
   Slot slots[kSlots];
   atomic<u32> next{0};
 
-  Names() {
-    for (auto& sl : slots) sl.state.store(0, memory_order_relaxed);
-  }
+  Names() { memset(slots, 0, sizeof slots); }
 
   static u32 slot_len(const Slot& sl) { return sl.meta >> 18; }
   static u32 slot_id(const Slot& sl) { return sl.meta & ((1u << 18) - 1); }
@@ -224,6 +211,8 @@ struct Names {
     u32 i = h & kMask;
     u32 advanced = 0;
     for (;;) {
+      // The next probe usually follows. Bring it in before the hash compare.
+      _mm_prefetch(&slots[(i + 1) & kMask], _MM_HINT_T0);
       u32 st = slots[i].state.load(memory_order_acquire);
       if (st == h) {
         if (eq(slots[i], s, n)) return slot_id(slots[i]);
@@ -383,15 +372,11 @@ inline View parse_record(const char* p, const char* end) {
   return v;
 }
 
+// Every CR in this file is the start of a CRLF record break.
 const char* find_crlf(const char* p, const char* end) {
-  while (p + 1 < end) {
-    const void* hit = memchr(p, '\r', (size_t)(end - p));
-    if (!hit) return end;
-    const char* c = (const char*)hit;
-    if (c + 1 < end && c[1] == '\n') return c + 2;
-    p = c + 1;
-  }
-  return end;
+  if (p >= end) return end;
+  const void* hit = memchr(p, '\r', (size_t)(end - p));
+  return hit ? (const char*)hit + 2 : end;
 }
 
 void append_u64(vector<char>& o, u64 x) {
