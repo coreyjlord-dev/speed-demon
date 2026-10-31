@@ -17,7 +17,8 @@ The number that must not regress is the board wall time. A later push to this tr
 | 10 | 2026-10-31 | | | 0.433 s | Phrase anchor matches two bytes before the scalar walk. Paired with row 9 on this box: 12-thread median 455 ms to 433 ms, 8-thread 432 ms to 408 ms. memory.peak unchanged. scc 1072. Estimated 59.6. Dropped: at the board anchor that length scores about 62. |
 | 11 | 2026-10-31 | | | 0.343 s | Two-byte phrase anchor, one output write, prefetch group 16, on the board solver. The S=308 figure used a formatter guard and does not count. Guard removed: scc 715, board-scale 0.292 s, est 64.8. Not a win. |
 | 12 | 2026-10-31 | | | 0.343 s | Shared bitmap filter and one query parser. scc 702. Paired 4-thread wall ties row 11. 12-thread deltas on this 4-core VM are noise. Est 64.8. Not a win. |
+| 13 | 2026-10-31 | | | | Log blocks cut from 2^18 to 2^16 entries. 12-thread cgroup peak 80.5 MB to 77.3 MB. 4-thread wall median −2.8 ms. scc still 702. Est 65.0. Not a win. |
 
 VERIFIED-WIN: 688e93de05b51cc0af2670212ccb015d1b3d0de2 local T=434 RSS=70 src=23925
 BOARD-CANDIDATE: c6c556a7e7db00392b4bb1ab35283daed318637e
-NOT-A-WIN: guard-free S=702 T=0.292 est=64.8
+NOT-A-WIN: guard-free S=702 T=0.292 M=77.3MB est=65.0

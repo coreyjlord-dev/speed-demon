@@ -274,7 +274,7 @@ void for_tokens(const uint8_t *q, const uint8_t *e, const Terms &terms,
 }
 
 struct BlockLog {
-  static constexpr size_t kBlock = 1 << 18, kBytes = 3 * kBlock + 4;
+  static constexpr size_t kBlock = 1 << 16, kBytes = 3 * kBlock + 4;
   vector<uint8_t *> blocks;
   uint8_t *cur = nullptr;
   size_t fill = kBlock;
