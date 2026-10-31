@@ -24,6 +24,7 @@
 namespace {
 
 using u8 = uint8_t;
+using u16 = uint16_t;
 using u32 = uint32_t;
 using u64 = uint64_t;
 using Edge = std::pair<u32, u32>;
@@ -213,17 +214,26 @@ struct Pending {
   u32 vertex;
 };
 
-// Circular bucket queue. Long jumps live in the side heap.
+// One pool of bucket links. A vertex may sit in several buckets; stale
+// entries are skipped when they are popped.
 struct Dial {
-  std::vector<u32> bin[kDial];
+  struct Node {
+    u32 vertex;
+    u32 next;
+  };
+  std::vector<Node> pool;
+  u32 head[kDial];
   std::vector<int> touched;
   std::vector<Pending> far;
   u64 cur = 0;
 
+  Dial() { std::fill(head, head + kDial, ~0u); }
+
   void clear() {
     for (int index : touched)
-      bin[index].clear();
+      head[index] = ~0u;
     touched.clear();
+    pool.clear();
     far.clear();
     cur = 0;
   }
@@ -234,9 +244,19 @@ struct Dial {
       return;
     }
     u32 index = (u32)distance & (kDial - 1);
-    if (bin[index].empty())
+    if (head[index] == ~0u)
       touched.push_back((int)index);
-    bin[index].push_back(vertex);
+    pool.push_back({vertex, head[index]});
+    head[index] = (u32)pool.size() - 1;
+  }
+
+  bool pop(u32 index, u32 &vertex) {
+    u32 slot = head[index];
+    if (slot == ~0u)
+      return false;
+    vertex = pool[slot].vertex;
+    head[index] = pool[slot].next;
+    return true;
   }
 
   bool take_far(u64 &distance, u32 &vertex) {
@@ -288,27 +308,25 @@ int64_t dijkstra(const Graph &graph, DistanceStore &dist, Dial &queue,
     relax(u);
     return 0;
   };
-  auto &bin = queue.bin;
   while (true) {
     u32 index = (u32)queue.cur & (kDial - 1);
-    if (bin[index].empty()) {
+    u32 vertex;
+    if (!queue.pop(index, vertex)) {
       u32 step = 1;
-      while (step < kDial && bin[(queue.cur + step) & (kDial - 1)].empty())
+      while (step < kDial &&
+             queue.head[(queue.cur + step) & (kDial - 1)] == ~0u)
         ++step;
       if (step < kDial) {
         queue.cur += step;
         continue;
       }
       u64 far;
-      u32 vertex;
       if (!queue.take_far(far, vertex))
         return -1;
       if (settle(vertex, far))
         return (int64_t)queue.cur;
       continue;
     }
-    u32 vertex = bin[index].back();
-    bin[index].pop_back();
     if (settle(vertex, queue.cur))
       return (int64_t)queue.cur;
   }
@@ -463,8 +481,8 @@ void load(const char *path, Graph &graph, u32 *&id) {
   require(graph_fd >= 0, "open graph");
   struct stat info;
   require(!fstat(graph_fd, &info), "fstat");
-  void *mapped =
-      mmap(nullptr, (size_t)info.st_size, PROT_READ, MAP_PRIVATE, graph_fd, 0);
+  void *mapped = mmap(nullptr, (size_t)info.st_size, PROT_READ,
+                      MAP_PRIVATE | MAP_POPULATE, graph_fd, 0);
   require(mapped != MAP_FAILED, "mmap file");
   file_bytes = (const char *)mapped;
   char header[64]{};
@@ -498,32 +516,59 @@ void load(const char *path, Graph &graph, u32 *&id) {
   }
 
   u32 nodes = graph.nodes;
-  graph.offset = alloc_array<u32>(nodes + 1);
-  memset(graph.offset, 0, (nodes + 1ull) * 4);
-  auto *degree = (std::atomic<u32> *)graph.offset;
+  require(nodes < (1u << 21), "n");
+  // Pass 1. One u16 degree array per thread, never an edge buffer.
+  std::vector<u16 *> degrees(threads);
   parallel(threads, [&](int part) {
+    u16 *degree = alloc_array<u16>(nodes);
+    memset(degree, 0, nodes * 2ull);
+    degrees[part] = degree;
     parse_range(cut[part], cut[part + 1], [&](u32 from, u32, u32) {
-      degree[from + 1].fetch_add(1, kRelaxed);
+      if (from >= nodes || degree[from] == 65535)
+        die("degree");
+      degree[from]++;
     });
   });
-  for (u32 i = 1; i <= nodes; ++i)
-    graph.offset[i] += graph.offset[i - 1];
+  graph.offset = alloc_array<u32>(nodes + 1);
+  graph.offset[0] = 0;
+  for (u32 vertex = 0; vertex < nodes; ++vertex) {
+    u32 sum = 0;
+    for (int part = 0; part < threads; ++part)
+      sum += degrees[part][vertex];
+    graph.offset[vertex + 1] = graph.offset[vertex] + sum;
+  }
   graph.edge_count = graph.offset[nodes];
-  require(nodes < (1u << 21), "n");
+  // Turn per-thread degrees into bases within each vertex's edge block.
+  for (u32 vertex = 0; vertex < nodes; ++vertex) {
+    u32 base = 0;
+    for (int part = 0; part < threads; ++part) {
+      u16 have = degrees[part][vertex];
+      if (have == 65535 || base > 65535)
+        die("degree");
+      degrees[part][vertex] = (u16)base;
+      base += have;
+    }
+  }
   u32 slots = graph.edge_count ? graph.edge_count : 1;
   graph.packed = alloc_array<u32>(slots);
-  auto *cursor = (std::atomic<u32> *)alloc_array<u32>(nodes);
-  for (u32 vertex = 0; vertex < nodes; ++vertex)
-    cursor[vertex].store(graph.offset[vertex], kRelaxed);
   EdgeGroups heavy_parts(threads);
+  // Pass 2. Same file, private bases, no edge buffer and no atomic cursor.
   parallel(threads, [&](int part) {
+    u16 *base = degrees[part];
     Edges &heavy = heavy_parts[part];
     parse_range(cut[part], cut[part + 1], [&](u32 from, u32 to, u32 weight) {
-      u32 index = cursor[from].fetch_add(1, kRelaxed);
+      if (from >= nodes || to >= nodes)
+        return;
+      u32 local = base[from];
+      if (local == 65535)
+        die("degree");
+      base[from] = (u16)(local + 1);
+      u32 index = graph.offset[from] + local;
       graph.packed[index] = pack_edge(to, weight, heavy, index);
     });
   });
-  free_array(cursor, nodes, 4);
+  for (int part = 0; part < threads; ++part)
+    free_array(degrees[part], nodes, 2);
   munmap((void *)file_bytes, (size_t)file_end);
   close(graph_fd);
   build_heavy(graph.heavy, heavy_parts);
