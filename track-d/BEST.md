@@ -10,7 +10,7 @@ READABLE-WIN: e99118c formatted S=610 est 61.1 points (board 328.9 ms, 69 MB hel
 READABLE-WIN: 30f5ece S=624 est=61.73
 HONEST-S: 6eed07d guarded scc 278 is invalid. Formatter-stable S=603. At 331 ms and 69 MB that is 61.06, not 63.57.
 READABLE-WIN: 4397e52 S=564 est=62.91. One SWAR scanner for header, edges, and queries. Degree 65535 fallbacks removed (max degree on all seven sets is 10). Heavy weights are a sorted table. 4-thread median ties 66ab391; cgroup peak about 59.6 MiB either way.
-BOARD: best kept is run-941d46f514cc, T=0.328913 s, M=69054464, S=285, 63.566. Latest speed-demon run-998aaaf7ccc9 is the two-pass solver at T=0.385349 s, M=72458240, S=656, 58.922. At that measured time, S=460 scores about 60.1. Clearing 63.566 there needs about T≤0.279 s at S=460, or T≤0.263 s at S=564.
+BOARD: best kept is run-941d46f514cc, T=0.328913 s, M=69054464, S=285, 63.566. Latest speed-demon run-cd06bca6b110 is T=0.380301 s, M=71909376, S=656, 59.099. Track D leader is Cause Of Death, run-fd84bc908d3e, T=0.121622 s, M=67579904, S=442, 73.032.
 VERIFIED-WIN: aaf13d1 local T=520 RSS=79 src=318
 VERIFIED-WIN: acb4383 local T=614 RSS=79 src=582
 
