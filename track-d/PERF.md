@@ -11,3 +11,4 @@
 | 9 | Readable source, no clang-format off | local | same binary time | 69 | ~60.9 est |
 | 10 | Shared settle, heavy join, and checks | local | same binary time | 69 | ~61.1 est |
 | 11 | One pool of Dial bucket links | local | ~0.93x | 69 | ~61.7 est |
+| 12 | Two-pass CSR, private u16 degrees, no edge buffer | local | 0.469 s vs 0.549 s | 70 | 62.4 est |
