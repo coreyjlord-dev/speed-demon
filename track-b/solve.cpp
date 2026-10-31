@@ -463,19 +463,21 @@ struct Post {
 
 size_t gallop(const u32 *a, size_t i, size_t n, u32 x) {
   size_t step = 1, hi = i;
-  WB(hi < n && a[hi] < x, i = hi + 1; hi += step;
-     IF(step < (1u << 30), step <<= 1));
+  WB(hi < n && a[hi] < x, i = hi + 1; hi += step; step <<= 1);
   IF(hi > n, hi = n);
   return (size_t)(lower_bound(a + i, a + hi, x) - a);
+}
+
+void keep_bits(const vector<u32> &a, const u64 *bits, u64 want,
+               vector<u32> &out) {
+  FOR(u32 x
+      : a, IF(((bits[x >> 6] >> (x & 63)) & 1ull) == want, out.push_back(x)));
 }
 
 void op_and(const vector<u32> &a, const Post &b, vector<u32> &out) {
   out.clear();
   IF(!b.n, return);
-  IB(b.bits,
-     FOR(u32 x
-         : a, IF((b.bits[x >> 6] >> (x & 63)) & 1ull, out.push_back(x)));
-     return);
+  IB(b.bits, keep_bits(a, b.bits, 1, out); return);
   IB(a.size() * 16 < b.n, size_t j = 0;
      FB(u32 x
         : a, j = gallop(b.p, j, b.n, x);
@@ -495,10 +497,7 @@ void op_merge(const vector<u32> &a, const Post &b, vector<u32> &out,
               bool keep_b) {
   out.clear();
   IB(!b.n, out = a; return);
-  IB(b.bits,
-     FOR(u32 x
-         : a, IF(((b.bits[x >> 6] >> (x & 63)) & 1ull) == 0, out.push_back(x)));
-     return);
+  IB(b.bits, keep_bits(a, b.bits, 0, out); return);
   size_t i = 0, j = 0;
   WB(i < a.size() && j < b.n,
      IB(a[i] == b.p[j], IF(keep_b, out.push_back(a[i])); ++i; ++j)
@@ -700,35 +699,25 @@ int main() {
   std::vector<u32> qterms;
   std::vector<char> qops;
   queries.reserve(50000);
-  static constexpr char kOp[] = {'A', 'O', 'N'};
-  static constexpr int kOpN[] = {3, 2, 3};
-  static constexpr char kOpW[][4] = {"AND", "OR", "NOT"};
   const uint8_t *p = qf.data;
   const uint8_t *qe = p + qf.size;
+  // Operators are AND / OR / NOT, so the first letter selects the code.
   WB(p < qe, const uint8_t *line = p; WH(p < qe && *p != '\n', ++p);
      const uint8_t *lend = p; IF(p < qe, ++p); Qry q;
-     IB((size_t)(lend - line) >= 5 && memcmp(line, "BOOL ", 5) == 0,
-        q.begin = (u32)qterms.size();
-        q.op_at = (u32)qops.size(); const uint8_t *s = line + 5;
-        WB(s < lend, const uint8_t *t = s; WH(s < lend && *s != ' ', ++s);
-           qterms.push_back(terms.add(t, (u32)(s - t))); IF(s >= lend, break);
-           ++s;
-           FB(int k = 0; k < 3;
-              ++k, IB(s + kOpN[k] <= lend && memcmp(s, kOpW[k], kOpN[k]) == 0,
-                      qops.push_back(kOp[k]);
-                      s += kOpN[k]; break));
-           IF(s < lend && *s == ' ', ++s));
-        q.n = (u32)(qterms.size() - q.begin))
-         EIB((size_t)(lend - line) >= 7 && memcmp(line, "PHRASE ", 7) == 0,
-             q.phrase = true;
-             q.begin = (u32)qterms.size(); const uint8_t *s = line + 7;
-             IF(s < lend && *s == '"', ++s);
-             WB(s < lend && *s != '"', const uint8_t *t = s;
-                WH(s < lend && *s != ' ' && *s != '"', ++s);
-                qterms.push_back(terms.add(t, (u32)(s - t)));
-                IF(s < lend && *s == ' ', ++s));
-             q.n = (u32)(qterms.size() - q.begin));
-     queries.push_back(q));
+     bool phrase =
+         (size_t)(lend - line) >= 7 && memcmp(line, "PHRASE ", 7) == 0;
+     q.phrase = phrase; q.begin = (u32)qterms.size();
+     q.op_at = (u32)qops.size(); const uint8_t *s = line + (phrase ? 7 : 5);
+     IF(phrase && s < lend && *s == '"', ++s);
+     WB(s < lend && *s != '"', const uint8_t *t = s;
+        WH(s < lend && *s != ' ' && *s != '"', ++s);
+        qterms.push_back(terms.add(t, (u32)(s - t)));
+        IF(s < lend && *s == ' ', ++s);
+        IB(!phrase && s < lend, qops.push_back(*s == 'O'   ? 'O'
+                                               : *s == 'N' ? 'N'
+                                                           : 'A');
+           s += qops.back() == 'O' ? 2 : 3; IF(s < lend && *s == ' ', ++s)));
+     q.n = (u32)(qterms.size() - q.begin); queries.push_back(q));
   int T = thread_count();
   Index ix = build(df, terms, qterms, T);
   malloc_trim(0);
