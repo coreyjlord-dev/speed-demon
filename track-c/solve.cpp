@@ -29,8 +29,8 @@ using u32 = uint32_t;
 using u64 = uint64_t;
 
 constexpr u8 kNoCountry = 0xff;
-// 2^18 slots of 24 bytes is 6 MB: short probes, and the heads fit in L3.
-constexpr u32 kSlots = 1u << 18;
+// 2^17 slots of 24 bytes is 3 MB, so the open-addressed table stays in L2.
+constexpr u32 kSlots = 1u << 17;
 constexpr u32 kMask = kSlots - 1;
 constexpr u32 kMaxNames = 1u << 17;
 constexpr u32 kWords = kMaxNames >> 6;
