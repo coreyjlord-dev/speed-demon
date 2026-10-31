@@ -10,3 +10,4 @@
 | 8 | Mapped SWAR parse, one word per edge | local | 0.465 | 65 | ~59.5 est |
 | 9 | Readable source, no clang-format off | local | same binary time | 69 | ~60.9 est |
 | 10 | Shared settle, heavy join, and checks | local | same binary time | 69 | ~61.1 est |
+| 11 | One pool of Dial bucket links | local | ~0.93x | 69 | ~61.7 est |
