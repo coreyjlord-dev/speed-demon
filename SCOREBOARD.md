@@ -24,4 +24,4 @@ Best-3 geometric mean of points: **66.32** (A, D, B).
 
 Reference anchors: A 32.047 s / 228 MB / S 56, B 56.35 s / 2200 MB / S 91, C 14.44 s / 367 MB / S 108, D 72.69 s / 893 MB / S 43.
 
-Points floors that must not drop: A 74.569 (`89b9471`, 43.757 ms, S=294), B 67.428 (`6a00c43`, 330.231 ms, S=210), C 62.969 (`3143e3a`, 75.285 ms, S=399), D 63.490 (`52ffffc`, 330.916 ms, S=285). B's start-bit walk scored 67.428 at 330.231 ms, 80,809,984 bytes, S=210. That is the floor.
+B stays on `c6c556a` at 67.428 (`6a00c43`, 330.231 ms, S=210). This push is A's readable rebuild `4d7b815`. Its board score becomes A's floor even if it is under 75.447. C 62.969 and D 63.566 stay.
