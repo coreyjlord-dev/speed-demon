@@ -291,6 +291,11 @@ int64_t dijkstra(const Graph &graph, DistanceStore &dist, Dial &queue,
     for (u32 edge = offset[vertex]; edge < offset[vertex + 1]; ++edge) {
       u32 code = packed[edge];
       u32 head = code & kHeadMask;
+      // The neighbor is the next cache miss: its distance line, then its edges.
+      u64 *chunk = dist.page[head >> 9];
+      if (chunk)
+        __builtin_prefetch(chunk + (head & 511));
+      __builtin_prefetch(packed + offset[head]);
       u64 next = cand + graph.weight_of(edge, code);
       u64 &best = dist.at(head);
       if (next < best) {
