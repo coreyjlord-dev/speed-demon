@@ -873,8 +873,14 @@ struct Engine {
   bool contains(const uint8_t *begin, const uint8_t *end, const u32 *phrase,
                 u32 phrase_n, u32 at) const {
     u32 anchor = phrase[at];
-    uint8_t first = terms->bytes(anchor)[0];
+    const uint8_t *key = terms->bytes(anchor);
+    uint8_t first = key[0];
+    u32 length = terms->rec[anchor].length;
+    // A second byte drops most false hits before the scalar token check.
+    // The map has a guard page, so the overlapped load stays in range.
+    uint8_t second = length > 1 ? key[1] : 0;
     const __m256i want = _mm256_set1_epi8((char)(first));
+    const __m256i want_next = _mm256_set1_epi8((char)(second));
     const __m256i fold = _mm256_set1_epi8(0x20);
     for (const uint8_t *p = begin; p < end;) {
       u32 hits = 0;
@@ -884,9 +890,22 @@ struct Engine {
         __m256i bytes = _mm256_loadu_si256((const __m256i *)(p));
         hits = (u32)(_mm256_movemask_epi8(
             _mm256_cmpeq_epi8(_mm256_or_si256(bytes, fold), want)));
+        if (length > 1) {
+          __m256i next = _mm256_loadu_si256((const __m256i *)(p + 1));
+          u32 more = (u32)(_mm256_movemask_epi8(
+              _mm256_cmpeq_epi8(_mm256_or_si256(next, fold), want_next)));
+          if (room == 32)
+            more &= 0x7fffffffu;
+          hits &= more;
+        }
       } else {
-        for (int i = 0; i < room; i++)
-          hits |= (u32)(((p[i] | 0x20) == first) << i);
+        for (int i = 0; i < room; i++) {
+          if ((p[i] | 0x20) != first)
+            continue;
+          if (length > 1 && (i + 1 >= room || (p[i + 1] | 0x20) != second))
+            continue;
+          hits |= 1u << i;
+        }
       }
       while (hits) {
         const uint8_t *start = p + __builtin_ctz(hits);
