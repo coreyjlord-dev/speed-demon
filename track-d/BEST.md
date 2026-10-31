@@ -9,6 +9,7 @@ READABLE-WIN: ebda02e formatted S=645 est 60.9 points (board 328.9 ms, 69 MB hel
 READABLE-WIN: e99118c formatted S=610 est 61.1 points (board 328.9 ms, 69 MB held)
 READABLE-WIN: 30f5ece S=624 est=61.73
 HONEST-S: 6eed07d guarded scc 278 is invalid. Formatter-stable S=603. At 331 ms and 69 MB that is 61.06, not 63.57.
+READABLE-WIN: pending S=564 est=62.91. One SWAR scanner for header, edges, and queries. Degree 65535 fallbacks removed (max degree on all seven sets is 10). Heavy weights are a sorted table. 4-thread median ties 66ab391; cgroup peak about 59.6 MiB either way. Passing 63.566 at 283 ms and 70 MB still needs S≤460.
 VERIFIED-WIN: aaf13d1 local T=520 RSS=79 src=318
 VERIFIED-WIN: acb4383 local T=614 RSS=79 src=582
 
