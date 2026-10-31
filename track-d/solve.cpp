@@ -42,6 +42,11 @@ constexpr u32 kHeavy = 2047;
   exit(1);
 }
 
+void require(bool ok, const char *message) {
+  if (!ok)
+    die(message);
+}
+
 int thread_count() {
   if (const char *env = std::getenv("SD_THREADS")) {
     int n = std::atoi(env);
@@ -49,11 +54,7 @@ int thread_count() {
       return n;
   }
   unsigned cores = std::thread::hardware_concurrency();
-  if (!cores)
-    return 1;
-  if (cores > 12)
-    return 12;
-  return (int)cores;
+  return cores ? (int)std::min(cores, 12u) : 1;
 }
 
 template <class T> T *alloc_array(size_t count) {
@@ -61,8 +62,7 @@ template <class T> T *alloc_array(size_t count) {
     count = 1;
   void *memory = mmap(nullptr, count * sizeof(T), PROT_READ | PROT_WRITE,
                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (memory == MAP_FAILED)
-    die("mmap");
+  require(memory != MAP_FAILED, "mmap");
   return (T *)memory;
 }
 
@@ -106,6 +106,13 @@ struct HeavyWeights {
     capacity = 0;
   }
 
+  u32 probe(u32 edge) const {
+    u32 slot = (edge * 0x9E3779B1u) & mask;
+    while (keys[slot] != ~0u && keys[slot] != edge)
+      slot = (slot + 1) & mask;
+    return slot;
+  }
+
   void build(const Edges &items) {
     clear();
     u32 cap = 8;
@@ -117,21 +124,21 @@ struct HeavyWeights {
     values = alloc_array<u32>(cap);
     memset(keys, 0xFF, cap * 4ull);
     for (auto [edge, weight] : items) {
-      u32 slot = (edge * 0x9E3779B1u) & mask;
-      while (keys[slot] != ~0u)
-        slot = (slot + 1) & mask;
+      u32 slot = probe(edge);
       keys[slot] = edge;
       values[slot] = weight;
     }
   }
 
-  u32 get(u32 edge) const {
-    u32 slot = (edge * 0x9E3779B1u) & mask;
-    while (keys[slot] != edge)
-      slot = (slot + 1) & mask;
-    return values[slot];
-  }
+  u32 get(u32 edge) const { return values[probe(edge)]; }
 };
+
+void build_heavy(HeavyWeights &table, const EdgeGroups &groups) {
+  Edges heavy;
+  for (auto &part : groups)
+    heavy.insert(heavy.end(), part.begin(), part.end());
+  table.build(heavy);
+}
 
 struct Graph {
   u32 nodes = 0;
@@ -191,8 +198,7 @@ struct DistanceStore {
     u32 chunk = vertex >> 9;
     u64 *&slot = page[chunk];
     if (!slot) {
-      if (!spare_count)
-        die("pages");
+      require(spare_count, "pages");
       slot = spare[--spare_count];
       memset(slot, 0xFF, kBlob * sizeof(u64));
       live[live_count++] = chunk;
@@ -201,110 +207,110 @@ struct DistanceStore {
   }
 };
 
-// Circular bucket queue. Weights that jump at least kDial go to a side heap.
+// A distance that jumps at least one full Dial turn.
+struct Pending {
+  u64 distance;
+  u32 vertex;
+};
+
+// Circular bucket queue. Long jumps live in the side heap.
 struct Dial {
-  std::vector<u32> bucket[kDial];
+  std::vector<u32> bin[kDial];
   std::vector<int> touched;
-  std::vector<u64> far_distance;
-  std::vector<u32> far_vertex;
-  u64 cursor = 0;
+  std::vector<Pending> far;
+  u64 cur = 0;
 
   void clear() {
     for (int index : touched)
-      bucket[index].clear();
+      bin[index].clear();
     touched.clear();
-    far_distance.clear();
-    far_vertex.clear();
-    cursor = 0;
+    far.clear();
+    cur = 0;
   }
 
   void push(u64 distance, u32 vertex) {
-    if (distance - cursor >= kDial) {
-      far_distance.push_back(distance);
-      far_vertex.push_back(vertex);
+    if (distance - cur >= kDial) {
+      far.push_back({distance, vertex});
       return;
     }
     u32 index = (u32)distance & (kDial - 1);
-    if (bucket[index].empty())
+    if (bin[index].empty())
       touched.push_back((int)index);
-    bucket[index].push_back(vertex);
+    bin[index].push_back(vertex);
   }
 
   bool take_far(u64 &distance, u32 &vertex) {
-    if (far_distance.empty())
+    if (far.empty())
       return false;
     size_t best = 0;
-    for (size_t i = 1; i < far_distance.size(); ++i) {
-      if (far_distance[i] < far_distance[best])
+    for (size_t i = 1; i < far.size(); ++i)
+      if (far[i].distance < far[best].distance)
         best = i;
-    }
-    distance = far_distance[best];
-    vertex = far_vertex[best];
-    far_distance[best] = far_distance.back();
-    far_vertex[best] = far_vertex.back();
-    far_distance.pop_back();
-    far_vertex.pop_back();
+    distance = far[best].distance;
+    vertex = far[best].vertex;
+    far[best] = far.back();
+    far.pop_back();
     return true;
   }
 };
 
-int64_t dijkstra(const Graph &graph, DistanceStore &distances, Dial &queue,
+int64_t dijkstra(const Graph &graph, DistanceStore &dist, Dial &queue,
                  u32 source, u32 target) {
   if (source == target)
     return 0;
-  if (graph.offset[source] == graph.offset[source + 1])
-    return -1;
-  if (!graph.has_incoming(target))
-    return -1;
-  distances.reset();
-  queue.clear();
-  distances.at(source) = 0;
-  queue.push(0, source);
   const u32 *offset = graph.offset;
   const u32 *packed = graph.packed;
-  auto relax = [&](u32 vertex) {
-    for (u32 edge = offset[vertex]; edge < offset[vertex + 1]; ++edge) {
+  if (offset[source] == offset[source + 1] || !graph.has_incoming(target))
+    return -1;
+  dist.reset();
+  queue.clear();
+  dist.at(source) = 0;
+  queue.push(0, source);
+  auto relax = [&](u32 u) {
+    for (u32 edge = offset[u]; edge < offset[u + 1]; ++edge) {
       u32 code = packed[edge];
       u32 head = code & kHeadMask;
-      u64 next = queue.cursor + graph.weight_of(edge, code);
-      u64 &best = distances.at(head);
+      u64 next = queue.cur + graph.weight_of(edge, code);
+      u64 &best = dist.at(head);
       if (next < best) {
         best = next;
         queue.push(next, head);
       }
     }
   };
+  // 1 = target settled, 0 = keep searching. A stale entry leaves cur alone.
+  auto settle = [&](u32 u, u64 distance) {
+    if (dist.at(u) != distance)
+      return 0;
+    queue.cur = distance;
+    if (u == target)
+      return 1;
+    relax(u);
+    return 0;
+  };
+  auto &bin = queue.bin;
   while (true) {
-    u32 index = (u32)queue.cursor & (kDial - 1);
-    if (queue.bucket[index].empty()) {
+    u32 index = (u32)queue.cur & (kDial - 1);
+    if (bin[index].empty()) {
       u32 step = 1;
-      while (step < kDial &&
-             queue.bucket[(queue.cursor + step) & (kDial - 1)].empty()) {
+      while (step < kDial && bin[(queue.cur + step) & (kDial - 1)].empty())
         ++step;
-      }
       if (step < kDial) {
-        queue.cursor += step;
+        queue.cur += step;
         continue;
       }
-      u64 far_distance;
-      u32 far_vertex;
-      if (!queue.take_far(far_distance, far_vertex))
+      u64 far;
+      u32 vertex;
+      if (!queue.take_far(far, vertex))
         return -1;
-      if (distances.at(far_vertex) != far_distance)
-        continue;
-      queue.cursor = far_distance;
-      if (far_vertex == target)
-        return (int64_t)queue.cursor;
-      relax(far_vertex);
+      if (settle(vertex, far))
+        return (int64_t)queue.cur;
       continue;
     }
-    u32 vertex = queue.bucket[index].back();
-    queue.bucket[index].pop_back();
-    if (distances.at(vertex) != queue.cursor)
-      continue;
-    if (vertex == target)
-      return (int64_t)queue.cursor;
-    relax(vertex);
+    u32 vertex = bin[index].back();
+    bin[index].pop_back();
+    if (settle(vertex, queue.cur))
+      return (int64_t)queue.cur;
   }
 }
 
@@ -339,36 +345,34 @@ struct Scanner {
       : cursor(file_bytes + begin), end(file_bytes + stop) {}
 
   bool read(u32 &out) {
-    if (cursor >= end || (unsigned char)*cursor < '0')
+    const char *&p = cursor;
+    if (p >= end || (unsigned char)*p < '0')
       return false;
-    size_t left = (size_t)(end - cursor);
+    size_t left = (size_t)(end - p);
     if (left >= 8) {
       u64 chunk;
-      memcpy(&chunk, cursor, 8);
+      memcpy(&chunk, p, 8);
       int span = digit_span(chunk);
       if (span >= 8) {
         out = eight_digits(chunk);
-        cursor += 8;
-        while (cursor < end && (unsigned char)*cursor >= '0' &&
-               *cursor <= '9') {
-          out = out * 10u + *cursor++ - '0';
-        }
+        p += 8;
+        while (p < end && (unsigned char)*p >= '0' && *p <= '9')
+          out = out * 10u + *p++ - '0';
       } else {
         out = 0;
         for (int i = 0; i < span; ++i) {
           out = out * 10u + (u32)((chunk & 255) - '0');
           chunk >>= 8;
         }
-        cursor += span;
+        p += span;
       }
     } else {
       out = 0;
-      while (cursor < end && (unsigned char)*cursor >= '0' && *cursor <= '9') {
-        out = out * 10u + *cursor++ - '0';
-      }
+      while (p < end && (unsigned char)*p >= '0' && *p <= '9')
+        out = out * 10u + *p++ - '0';
     }
-    if (cursor < end && *cursor)
-      ++cursor;
+    if (p < end && *p)
+      ++p;
     return true;
   }
 };
@@ -378,33 +382,24 @@ template <class Fn> void parse_range(off_t begin, off_t end, Fn fn) {
     return;
   Scanner scanner(begin, end);
   if (begin != edge_offset) {
-    while (scanner.cursor < scanner.end && *scanner.cursor != '\n') {
+    while (scanner.cursor < scanner.end && *scanner.cursor != '\n')
       ++scanner.cursor;
-    }
     if (scanner.cursor < scanner.end)
       ++scanner.cursor;
   }
   u32 from, to, weight;
-  while (scanner.read(from) && scanner.read(to) && scanner.read(weight)) {
+  while (scanner.read(from) && scanner.read(to) && scanner.read(weight))
     if (from != to)
       fn(from, to, weight);
-  }
-}
-
-template <class Fn>
-void parse_all(int threads, const std::vector<off_t> &cut, Fn fn) {
-  parallel(threads, [&](int part) {
-    parse_range(cut[(size_t)part], cut[(size_t)part + 1], fn);
-  });
 }
 
 // Claim nodes into per-thread BFS blobs of kBlob so later ids are local.
 void order_blobs(u32 nodes, u32 *offset, u32 *packed, u32 *id, int threads) {
   auto *claimed = alloc_array<std::atomic<u8>>(nodes);
   memset(claimed, 0, nodes);
-  std::vector<std::vector<u32>> chains((size_t)threads);
+  std::vector<std::vector<u32>> chains(threads);
   parallel(threads, [&](int part) {
-    auto &order = chains[(size_t)part];
+    auto &order = chains[part];
     order.reserve((nodes / (u32)threads) + kBlob);
     std::vector<u32> seeds;
     u32 scan = u32((u64)nodes * part / threads);
@@ -423,20 +418,19 @@ void order_blobs(u32 nodes, u32 *offset, u32 *packed, u32 *id, int threads) {
       }
       while (seed == nodes && scan < scan_end) {
         u32 candidate = scan++;
-        if (offset[candidate] != offset[candidate + 1] && claim(candidate)) {
+        if (offset[candidate] != offset[candidate + 1] && claim(candidate))
           seed = candidate;
-        }
       }
       if (seed == nodes)
         break;
       size_t base = order.size();
       size_t walk = base;
+      size_t limit = base + (size_t)kBlob;
       order.push_back(seed);
-      for (; walk < order.size() && order.size() - base < (size_t)kBlob;
-           ++walk) {
+      for (; walk < order.size() && order.size() < limit; ++walk) {
         u32 vertex = order[walk];
-        for (u32 edge = offset[vertex];
-             edge < offset[vertex + 1] && order.size() - base < (size_t)kBlob;
+        u32 last = offset[vertex + 1];
+        for (u32 edge = offset[vertex]; edge < last && order.size() < limit;
              ++edge) {
           u32 head = packed[edge] & kHeadMask;
           if (claim(head))
@@ -454,34 +448,27 @@ void order_blobs(u32 nodes, u32 *offset, u32 *packed, u32 *id, int threads) {
     }
   });
   u32 next = 0;
-  for (auto &order : chains) {
+  for (auto &order : chains)
     for (u32 vertex : order)
       id[vertex] = next++;
-  }
-  for (u32 vertex = 0; vertex < nodes; ++vertex) {
+  for (u32 vertex = 0; vertex < nodes; ++vertex)
     if (!claimed[vertex].load(kRelaxed))
       id[vertex] = next++;
-  }
   free_array(claimed, nodes, 1);
-  if (next != nodes)
-    die("order");
+  require(next == nodes, "order");
 }
 
 void load(const char *path, Graph &graph, u32 *&id) {
   graph_fd = ::open(path, O_RDONLY);
-  if (graph_fd < 0)
-    die("open graph");
+  require(graph_fd >= 0, "open graph");
   struct stat info;
-  if (fstat(graph_fd, &info))
-    die("fstat");
+  require(!fstat(graph_fd, &info), "fstat");
   void *mapped =
       mmap(nullptr, (size_t)info.st_size, PROT_READ, MAP_PRIVATE, graph_fd, 0);
-  if (mapped == MAP_FAILED)
-    die("mmap file");
+  require(mapped != MAP_FAILED, "mmap file");
   file_bytes = (const char *)mapped;
   char header[64]{};
-  if (::pread(graph_fd, header, 63, 0) < 2)
-    die("header");
+  require(::pread(graph_fd, header, 63, 0) >= 2, "header");
   char *header_cursor = header;
   graph.nodes = read_u32(header_cursor);
   read_u32(header_cursor);
@@ -494,9 +481,9 @@ void load(const char *path, Graph &graph, u32 *&id) {
   int threads = thread_count();
   if (file_end - edge_offset < (1 << 20))
     threads = 1;
-  std::vector<off_t> cut((size_t)threads + 1);
+  std::vector<off_t> cut(threads + 1);
   cut[0] = edge_offset;
-  cut[(size_t)threads] = file_end;
+  cut[threads] = file_end;
   off_t span = file_end - edge_offset;
   for (int part = 1; part < threads; ++part) {
     off_t at = edge_offset + span * part / threads;
@@ -505,46 +492,41 @@ void load(const char *path, Graph &graph, u32 *&id) {
     int skip = 0;
     while (skip < got && window[skip] != '\n')
       ++skip;
-    cut[(size_t)part] = at + (skip < got ? skip + 1 : 0);
-    if (cut[(size_t)part] < cut[(size_t)part - 1]) {
-      cut[(size_t)part] = cut[(size_t)part - 1];
-    }
+    cut[part] = at + (skip < got ? skip + 1 : 0);
+    if (cut[part] < cut[part - 1])
+      cut[part] = cut[part - 1];
   }
 
   u32 nodes = graph.nodes;
   graph.offset = alloc_array<u32>(nodes + 1);
   memset(graph.offset, 0, (nodes + 1ull) * 4);
   auto *degree = (std::atomic<u32> *)graph.offset;
-  parse_all(threads, cut, [&](u32 from, u32, u32) {
-    degree[from + 1].fetch_add(1, kRelaxed);
+  parallel(threads, [&](int part) {
+    parse_range(cut[part], cut[part + 1], [&](u32 from, u32, u32) {
+      degree[from + 1].fetch_add(1, kRelaxed);
+    });
   });
   for (u32 i = 1; i <= nodes; ++i)
     graph.offset[i] += graph.offset[i - 1];
   graph.edge_count = graph.offset[nodes];
-  if (nodes >= (1u << 21))
-    die("n");
-  graph.packed = alloc_array<u32>(graph.edge_count ? graph.edge_count : 1);
+  require(nodes < (1u << 21), "n");
+  u32 slots = graph.edge_count ? graph.edge_count : 1;
+  graph.packed = alloc_array<u32>(slots);
   auto *cursor = (std::atomic<u32> *)alloc_array<u32>(nodes);
-  for (u32 vertex = 0; vertex < nodes; ++vertex) {
+  for (u32 vertex = 0; vertex < nodes; ++vertex)
     cursor[vertex].store(graph.offset[vertex], kRelaxed);
-  }
-  EdgeGroups heavy_by_thread((size_t)threads);
+  EdgeGroups heavy_parts(threads);
   parallel(threads, [&](int part) {
-    parse_range(cut[(size_t)part], cut[(size_t)part + 1],
-                [&](u32 from, u32 to, u32 weight) {
-                  u32 index = cursor[from].fetch_add(1, kRelaxed);
-                  graph.packed[index] = pack_edge(
-                      to, weight, heavy_by_thread[(size_t)part], index);
-                });
+    Edges &heavy = heavy_parts[part];
+    parse_range(cut[part], cut[part + 1], [&](u32 from, u32 to, u32 weight) {
+      u32 index = cursor[from].fetch_add(1, kRelaxed);
+      graph.packed[index] = pack_edge(to, weight, heavy, index);
+    });
   });
   free_array(cursor, nodes, 4);
   munmap((void *)file_bytes, (size_t)file_end);
   close(graph_fd);
-  Edges heavy;
-  for (auto &part : heavy_by_thread) {
-    heavy.insert(heavy.end(), part.begin(), part.end());
-  }
-  graph.heavy.build(heavy);
+  build_heavy(graph.heavy, heavy_parts);
   id = alloc_array<u32>(nodes);
   order_blobs(nodes, graph.offset, graph.packed, id, thread_count());
 
@@ -554,10 +536,9 @@ void load(const char *path, Graph &graph, u32 *&id) {
   parallel(workers, [&](int part) {
     u32 begin = u32((u64)nodes * part / workers);
     u32 end = u32((u64)nodes * (part + 1) / workers);
-    for (u32 vertex = begin; vertex < end; ++vertex) {
-      new_offset[id[vertex] + 1] =
-          graph.offset[vertex + 1] - graph.offset[vertex];
-    }
+    u32 *off = graph.offset;
+    for (u32 vertex = begin; vertex < end; ++vertex)
+      new_offset[id[vertex] + 1] = off[vertex + 1] - off[vertex];
   });
   for (u32 i = 1; i <= nodes; ++i)
     new_offset[i] += new_offset[i - 1];
@@ -566,34 +547,32 @@ void load(const char *path, Graph &graph, u32 *&id) {
   graph.incoming = alloc_array<u32>(words);
   memset(graph.incoming, 0, words * 4ull);
   auto *incoming_bits = (std::atomic<u32> *)graph.incoming;
-  u32 *new_packed = alloc_array<u32>(graph.edge_count ? graph.edge_count : 1);
-  EdgeGroups remapped((size_t)workers);
+  u32 *new_packed = alloc_array<u32>(slots);
+  EdgeGroups remapped(workers);
   parallel(workers, [&](int part) {
-    auto &mine_heavy = remapped[(size_t)part];
+    Edges &mine = remapped[part];
+    u32 *off = graph.offset;
+    u32 *pack = graph.packed;
     u32 begin = u32((u64)nodes * part / workers);
     u32 end = u32((u64)nodes * (part + 1) / workers);
     for (u32 vertex = begin; vertex < end; ++vertex) {
       u32 dest = new_offset[id[vertex]];
-      for (u32 edge = graph.offset[vertex]; edge < graph.offset[vertex + 1];
-           ++edge, ++dest) {
-        u32 code = graph.packed[edge];
+      for (u32 edge = off[vertex]; edge < off[vertex + 1]; ++edge, ++dest) {
+        u32 code = pack[edge];
         u32 head = id[code & kHeadMask];
         u32 weight = code >> kShift;
         if (weight == kHeavy)
           weight = graph.heavy.get(edge);
-        new_packed[dest] = pack_edge(head, weight, mine_heavy, dest);
+        new_packed[dest] = pack_edge(head, weight, mine, dest);
         incoming_bits[head >> 5].fetch_or(1u << (head & 31), kRelaxed);
       }
     }
   });
-  free_array(graph.packed, graph.edge_count ? graph.edge_count : 1, 4);
+  free_array(graph.packed, slots, 4);
   free_array(graph.offset, nodes + 1, 4);
   graph.offset = new_offset;
   graph.packed = new_packed;
-  heavy.clear();
-  for (auto &part : remapped)
-    heavy.insert(heavy.end(), part.begin(), part.end());
-  graph.heavy.build(heavy);
+  build_heavy(graph.heavy, remapped);
 }
 
 void append_i64(char *&out, int64_t value) {
@@ -630,18 +609,15 @@ int main() {
   load((data + "/graph.txt").c_str(), graph, id);
 
   int query_fd = ::open((data + "/queries.txt").c_str(), O_RDONLY);
-  if (query_fd < 0)
-    die("open queries");
+  require(query_fd >= 0, "open queries");
   struct stat query_info;
-  if (fstat(query_fd, &query_info))
-    die("fstat q");
-  char *query_bytes = alloc_array<char>((size_t)query_info.st_size + 1);
+  require(!fstat(query_fd, &query_info), "fstat q");
+  size_t size = (size_t)query_info.st_size;
+  char *query_bytes = alloc_array<char>(size + 1);
   size_t got = 0;
-  while (got < (size_t)query_info.st_size) {
-    ssize_t n =
-        ::read(query_fd, query_bytes + got, (size_t)query_info.st_size - got);
-    if (n <= 0)
-      die("read q");
+  while (got < size) {
+    ssize_t n = ::read(query_fd, query_bytes + got, size - got);
+    require(n > 0, "read q");
     got += (size_t)n;
   }
   close(query_fd);
@@ -653,21 +629,17 @@ int main() {
     sources.push_back(id[source]);
     targets.push_back(id[target]);
   }
-  free_array(query_bytes, (size_t)query_info.st_size + 1, 1);
+  free_array(query_bytes, size + 1, 1);
   free_array(id, graph.nodes, 4);
 
   int query_count = (int)sources.size();
   std::vector<int> order(query_count);
   for (int i = 0; i < query_count; ++i)
     order[i] = i;
-  std::sort(order.begin(), order.end(),
-            [&](int a, int b) { return sources[a] < sources[b]; });
+  auto by_source = [&](int a, int b) { return sources[a] < sources[b]; };
+  std::sort(order.begin(), order.end(), by_source);
 
-  int workers = thread_count();
-  if (workers > query_count)
-    workers = query_count;
-  if (workers < 1)
-    workers = 1;
+  int workers = std::clamp(thread_count(), 1, std::max(query_count, 1));
   std::vector<int64_t> answers(query_count);
   std::atomic<int> next{0};
   u32 chunks = (graph.nodes + kBlob - 1) / kBlob;
@@ -690,14 +662,12 @@ int main() {
   for (int64_t distance : answers)
     append_i64(cursor, distance);
   int out_fd = ::open(out_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-  if (out_fd < 0)
-    die("open out");
+  require(out_fd >= 0, "open out");
   size_t left = (size_t)(cursor - out);
   const char *write_at = out;
   while (left) {
     ssize_t n = ::write(out_fd, write_at, left);
-    if (n < 0)
-      die("write");
+    require(n >= 0, "write");
     write_at += n;
     left -= (size_t)n;
   }
