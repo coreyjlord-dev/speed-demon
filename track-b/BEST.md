@@ -14,7 +14,8 @@ The number that must not regress is the board wall time. A later push to this tr
 | 7 | 2026-10-30 | | | | Start-bit token walk. Hashes match row 6. scc 211. Single-thread tokenize 158 ms to 113 ms. Local 12-thread wall is within noise on this 4-core VM. |
 | 8 | 2026-10-30 | | | 0.436 s | Readable rewrite of row 7. No clang-format guard. scc 1072. Paired 12-thread wall 436 ms vs 445 ms, memory.peak about 78 MB both. Estimated 59.0 vs 64.2. |
 | 9 | 2026-10-31 | | | 0.435 s | Leaner readable build. AND/OR/NOT share one list merge; queries share one term reader. scc 1055. Paired 12-thread wall matches row 8. Estimated 59.1. |
+| 10 | 2026-10-31 | | | 0.433 s | Phrase anchor matches two bytes before the scalar walk. Paired with row 9 on this box: 12-thread median 455 ms to 433 ms, 8-thread 432 ms to 408 ms. memory.peak unchanged. scc 1072. Estimated 59.6. |
 
 VERIFIED-WIN: 688e93de05b51cc0af2670212ccb015d1b3d0de2 local T=434 RSS=70 src=23925
 BOARD-CANDIDATE: c6c556a7e7db00392b4bb1ab35283daed318637e
-READABLE-WIN: 305e22e65a697594745c8195bad83fae3222d6fe S=1055 est=59.1
+READABLE-WIN: 1dfbd7c275baed013fb84eb0eb173156dc8d87fb S=1072 est=59.6
