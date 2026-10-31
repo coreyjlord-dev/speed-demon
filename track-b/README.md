@@ -12,4 +12,4 @@ None. Static C++20.
 
 ## With another 24 hours
 
-The scan is still most of the run. Term lookup hits a 1 MB table, skips a token already recorded in the current document, and folds the key with one multiply. Bitmap updates are plain ors. The harness counts 308 lines while formatting is held, and every source line is at most 120 characters. Dropping that guard reformats to 717 lines and the same speed scores about 64.9, under the board's 67.43. The scan is still most of the run. The record on the board is about 0.33 s and 81 MB; this tree's board-scale estimate is 0.292 s at the same memory, about 67.5 points.
+The scan is still most of the run. Term lookup hits a 1 MB table, skips a token already recorded in the current document, and folds the key with one multiply. Bitmap updates are plain ors. There is no formatter guard. After `clang-format --style=LLVM`, scc counts 715 lines. At the board-scale 0.292 s and 81 MB that is about 64.8 points, under the board's 67.43. The scan is still most of the run. The record on the board is about 0.33 s and 81 MB.

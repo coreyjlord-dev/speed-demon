@@ -15,8 +15,8 @@ The number that must not regress is the board wall time. A later push to this tr
 | 8 | 2026-10-30 | | | 0.436 s | Readable rewrite of row 7. No clang-format guard. scc 1072. Paired 12-thread wall 436 ms vs 445 ms, memory.peak about 78 MB both. Estimated 59.0 vs 64.2. |
 | 9 | 2026-10-31 | | | 0.435 s | Leaner readable build. AND/OR/NOT share one list merge; queries share one term reader. scc 1055. Paired 12-thread wall matches row 8. Estimated 59.1. |
 | 10 | 2026-10-31 | | | 0.433 s | Phrase anchor matches two bytes before the scalar walk. Paired with row 9 on this box: 12-thread median 455 ms to 433 ms, 8-thread 432 ms to 408 ms. memory.peak unchanged. scc 1072. Estimated 59.6. Dropped: at the board anchor that length scores about 62. |
-| 11 | 2026-10-31 | | | 0.343 s | Back on the board solver. Two-byte phrase anchor, one output write, prefetch group 16. Paired 4-thread median 391 ms to 343 ms, 12-thread 449 ms to 397 ms, memory.peak matched the board binary. scc 308 with the formatter guard. Board-scale T=0.292 s, est 67.5. |
+| 11 | 2026-10-31 | | | 0.343 s | Two-byte phrase anchor, one output write, prefetch group 16, on the board solver. The S=308 figure used a formatter guard and does not count. Guard removed: scc 715, board-scale 0.292 s, est 64.8. Not a win. |
 
-VERIFIED-WIN: e5fd1e54eb2669eb6103f6b9861a28d667dd86b9 local T=343 RSS=66 src=24100
+VERIFIED-WIN: 688e93de05b51cc0af2670212ccb015d1b3d0de2 local T=434 RSS=70 src=23925
 BOARD-CANDIDATE: c6c556a7e7db00392b4bb1ab35283daed318637e
-BOARD-SCALE: e5fd1e54eb2669eb6103f6b9861a28d667dd86b9 S=308 T=0.292 est=67.5
+NOT-A-WIN: guard-free S=715 T=0.292 est=64.8
