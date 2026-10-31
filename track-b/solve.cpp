@@ -679,33 +679,39 @@ size_t gallop(const u32 *docs, size_t i, size_t n, u32 target) {
   return (size_t)(lower_bound(docs + i, docs + hi, target) - docs);
 }
 
-void op_and(const vector<u32> &a, const Posting &b, vector<u32> &out) {
+// 'A' keeps the intersection, 'O' the union, 'N' the difference a-b.
+// Bitmap OR is applied before this. A bitmap here is AND or NOT.
+void merge_docs(const vector<u32> &a, const Posting &b, vector<u32> &out,
+                char op) {
   out.clear();
-  if (!b.n)
+  if (!b.n) {
+    if (op != 'A')
+      out = a;
     return;
+  }
   if (b.bits) {
     for (u32 doc : a)
-      if (doc_bit(b.bits, doc))
+      if (doc_bit(b.bits, doc) != (op == 'N'))
         out.push_back(doc);
     return;
   }
-  if (a.size() * 16 < b.n) {
+  if (op == 'A' && a.size() * 16 < b.n) {
     size_t j = 0;
     for (u32 doc : a) {
       j = gallop(b.docs, j, b.n, doc);
       if (j == b.n)
-        break;
+        return;
       if (b.docs[j] == doc)
         out.push_back(doc);
     }
     return;
   }
-  if (b.n * 16 < a.size()) {
+  if (op == 'A' && b.n * 16 < a.size()) {
     size_t i = 0;
     for (size_t k = 0; k < b.n; k++) {
       i = gallop(a.data(), i, a.size(), b.docs[k]);
       if (i == a.size())
-        break;
+        return;
       if (a[i] == b.docs[k])
         out.push_back(b.docs[k]);
     }
@@ -714,50 +720,24 @@ void op_and(const vector<u32> &a, const Posting &b, vector<u32> &out) {
   size_t i = 0, j = 0;
   while (i < a.size() && j < b.n) {
     if (a[i] == b.docs[j]) {
-      out.push_back(a[i]);
-      ++i;
-      ++j;
-    } else if (a[i] < b.docs[j]) {
-      ++i;
-    } else {
-      ++j;
-    }
-  }
-}
-
-// Bitmap OR is applied in boolean() before this is called. The bitmap
-// branch here is NOT: drop documents whose bit is set.
-void op_merge(const vector<u32> &a, const Posting &b, vector<u32> &out,
-              bool keep_b) {
-  out.clear();
-  if (!b.n) {
-    out = a;
-    return;
-  }
-  if (b.bits) {
-    for (u32 doc : a)
-      if (!doc_bit(b.bits, doc))
-        out.push_back(doc);
-    return;
-  }
-  size_t i = 0, j = 0;
-  while (i < a.size() && j < b.n) {
-    if (a[i] == b.docs[j]) {
-      if (keep_b)
+      if (op != 'N')
         out.push_back(a[i]);
       ++i;
       ++j;
     } else if (a[i] < b.docs[j]) {
-      out.push_back(a[i++]);
+      if (op != 'A')
+        out.push_back(a[i]);
+      ++i;
     } else {
-      if (keep_b)
+      if (op == 'O')
         out.push_back(b.docs[j]);
       ++j;
     }
   }
-  while (i < a.size())
-    out.push_back(a[i++]);
-  if (keep_b)
+  if (op != 'A')
+    while (i < a.size())
+      out.push_back(a[i++]);
+  if (op == 'O')
     while (j < b.n)
       out.push_back(b.docs[j++]);
 }
@@ -848,10 +828,7 @@ struct Engine {
           bitmap[doc >> 6] |= 1ull << (doc & 63);
         dense = true;
       } else {
-        if (op == 'A')
-          op_and(cur, b, tmp);
-        else
-          op_merge(cur, b, tmp, op == 'O');
+        merge_docs(cur, b, tmp, op);
         cur.swap(tmp);
       }
     }
@@ -963,7 +940,7 @@ struct Engine {
     else
       cur.assign(rarest.docs, rarest.docs + rarest.n);
     for (size_t i = 1; i < order.size() && !cur.empty(); i++) {
-      op_and(cur, decode(order[i]), tmp);
+      merge_docs(cur, decode(order[i]), tmp, 'A');
       cur.swap(tmp);
     }
     u32 anchor_at = 0;
@@ -1050,6 +1027,13 @@ int main() {
   static constexpr int kOpLen[] = {3, 2, 3};
   static constexpr char kOpWord[][4] = {"AND", "OR", "NOT"};
 
+  auto take_term = [&](const uint8_t *&cursor, const uint8_t *stop,
+                       char extra) {
+    const uint8_t *word = cursor;
+    while (cursor < stop && *cursor != ' ' && *cursor != extra)
+      ++cursor;
+    return terms.add(word, (u32)(cursor - word));
+  };
   const uint8_t *p = queries_file.data;
   const uint8_t *end = p + queries_file.size;
   while (p < end) {
@@ -1060,15 +1044,15 @@ int main() {
     if (p < end)
       ++p;
     Query query;
+    const uint8_t *cursor = line;
+    bool parsed = false;
     if ((size_t)(line_end - line) >= 5 && memcmp(line, "BOOL ", 5) == 0) {
-      query.begin = (u32)(query_terms.size());
-      query.op_at = (u32)(query_ops.size());
-      const uint8_t *cursor = line + 5;
+      parsed = true;
+      query.begin = (u32)query_terms.size();
+      query.op_at = (u32)query_ops.size();
+      cursor = line + 5;
       while (cursor < line_end) {
-        const uint8_t *word = cursor;
-        while (cursor < line_end && *cursor != ' ')
-          ++cursor;
-        query_terms.push_back(terms.add(word, (u32)(cursor - word)));
+        query_terms.push_back(take_term(cursor, line_end, 0));
         if (cursor >= line_end)
           break;
         ++cursor;
@@ -1083,24 +1067,22 @@ int main() {
         if (cursor < line_end && *cursor == ' ')
           ++cursor;
       }
-      query.n = (u32)(query_terms.size() - query.begin);
     } else if ((size_t)(line_end - line) >= 7 &&
                memcmp(line, "PHRASE ", 7) == 0) {
+      parsed = true;
       query.phrase = true;
-      query.begin = (u32)(query_terms.size());
-      const uint8_t *cursor = line + 7;
+      query.begin = (u32)query_terms.size();
+      cursor = line + 7;
       if (cursor < line_end && *cursor == '"')
         ++cursor;
       while (cursor < line_end && *cursor != '"') {
-        const uint8_t *word = cursor;
-        while (cursor < line_end && *cursor != ' ' && *cursor != '"')
-          ++cursor;
-        query_terms.push_back(terms.add(word, (u32)(cursor - word)));
+        query_terms.push_back(take_term(cursor, line_end, '"'));
         if (cursor < line_end && *cursor == ' ')
           ++cursor;
       }
-      query.n = (u32)(query_terms.size() - query.begin);
     }
+    if (parsed)
+      query.n = (u32)query_terms.size() - query.begin;
     queries.push_back(query);
   }
 
