@@ -1,4 +1,4 @@
-// Track C. One pass over records.csv.
+// Track C. One parse into per-thread runs, then one shared bitset.
 // IF/IB/FOR/FB/WH/WB/EL/EI/EIB/EB are the same control flow, packed so a
 // formatted line holds the header and the body. Behavior matches the 582-line
 // build: same threads, same allocator tuning, same hash.
@@ -278,6 +278,26 @@ u32 popcount_words(const u64* b) {
   return n;
 }
 
+// Fixed-size runs of name ids. Threads append only to their own runs.
+struct Chunk {
+  Chunk* next = nullptr;
+  u32 n = 0;
+  u32 ids[32]{};
+};
+
+struct Blocks {
+  struct Node {
+    Node* next = nullptr;
+    u32 used = 0;
+    Chunk chunks[128]{};
+  };
+  Node* head = nullptr;
+  Chunk* take() {
+    IB(!head || head->used == 128, Node* n = new Node; n->next = head; head = n);
+    return &head->chunks[head->used++];
+  }
+};
+
 }  // namespace
 
 int main() {
@@ -303,54 +323,69 @@ int main() {
   FB(int t = 1; t < T; t++, const char* cut = data + records.len * (size_t)t / (size_t)T;
      IF(cut < first, cut = first); starts[t] = find_crlf(cut, end));
   FB(int t = 1; t <= T; t++, IF(starts[t] < starts[t - 1], starts[t] = starts[t - 1]));
-  Names* names = new Names;
-  vector<vector<vector<u32>>> buckets((size_t)T);
-  FB(int t = 0; t < T; t++, buckets[t].resize(countries));
   vector<vector<Agg>> ags((size_t)T, vector<Agg>(countries));
+  vector<Chunk*> heads((size_t)T * countries, nullptr);
+  vector<Blocks> blocks((size_t)T);
+  Names* names = new Names;
   vector<thread> pool;
+  // Each thread scatters name ids into its own per-country runs.
   FB(int t = 0; t < T; t++, pool.emplace_back([&, t] {
        vector<Agg>& ag = ags[t];
-       auto& bk = buckets[t];
+       Blocks& arena = blocks[t];
        Pend ring[16];
-       int head = 0, filled = 0;
+       int hd = 0, filled = 0;
+       auto push_id = [&](u32 cid, u32 id) {
+         size_t ix = (size_t)t * countries + cid;
+         Chunk* h = heads[ix];
+         IB(!h || h->n == 32, Chunk* c = arena.take(); c->next = h; c->n = 0; heads[ix] = h = c);
+         h->ids[h->n++] = id;
+       };
        auto drain_one = [&] {
-         Pend e = ring[head];
-         head = (head + 1) & 15;
-         filled--;
-         bk[e.country].push_back(names->intern(e.s, e.n, e.h));
+         Pend e = ring[hd];
+         hd = (hd + 1) & 15;
+         --filled;
+         push_id(e.country, names->intern(e.s, e.n, e.h));
        };
        const char *q = starts[t], *limit = starts[t + 1];
-       WB(q < limit && q < end, IF(q >= limit || q >= end, break); _mm_prefetch(q + 256, _MM_HINT_T0);
-          View v = parse_at(q, end); u32 cid = country_index(world, v.region); Agg& a = ag[cid];
+       WB(q < limit && q < end, _mm_prefetch(q + 256, _MM_HINT_T0); View v = parse_at(q, end);
+          u32 cid = country_index(world, v.region); Agg& a = ag[cid];
           a.count++; a.id_sum += v.id; a.amount_sum += v.cents;
-          IF(v.cents < a.amin, a.amin = v.cents); IF(v.cents > a.amax, a.amax = v.cents);
-          a.name_bytes += v.name_un; a.note_bytes += v.note_un; u32 h = Names::mix(v.name, v.name_raw);
-          _mm_prefetch((const char*)&names->tags[h & kMask], _MM_HINT_T0);
-          _mm_prefetch((const char*)&names->slots[h & kMask], _MM_HINT_T0);
-          IF(filled == 16, drain_one()); ring[(head + filled) & 15] = Pend{cid, v.name, v.name_raw, h};
-          filled++; q = v.next);
+          IF(v.cents < a.amin, a.amin = v.cents);
+          IF(v.cents > a.amax, a.amax = v.cents);
+          a.name_bytes += v.name_un; a.note_bytes += v.note_un; u32 hsh = Names::mix(v.name, v.name_raw);
+          _mm_prefetch((const char*)&names->tags[hsh & kMask], _MM_HINT_T0);
+          _mm_prefetch((const char*)&names->slots[hsh & kMask], _MM_HINT_T0);
+          IF(filled == 16, drain_one());
+          ring[(hd + filled) & 15] = Pend{cid, v.name, v.name_raw, hsh}; ++filled; q = v.next);
        WB(filled, drain_one());
      }));
   FB(auto& th : pool, th.join());
+  delete names;
+  // Own a contiguous run of countries with roughly equal record counts.
+  vector<u64> load(countries);
+  FB(int t = 0; t < T; t++, FB(size_t c = 0; c < countries; c++, load[c] += ags[t][c].count));
+  u64 total = 0;
+  FB(u64 n : load, total += n);
+  vector<u32> cut((size_t)T + 1);
+  cut[T] = (u32)countries;
+  u64 run = 0;
+  int part = 0;
+  FB(u32 c = 0; c < countries && part + 1 < T; ++c, run += load[c];
+     WB(part + 1 < T && run >= total * (u64)(part + 1) / (u64)T, cut[++part] = c + 1));
+  WB(part + 1 < T, cut[++part] = (u32)countries);
+  // One bitset. Only the owner of a country writes that row.
+  vector<u64> bits((size_t)countries * kWords);
   vector<u32> distinct(countries);
-  {
-    atomic<u32> cursor{0};
-    vector<thread> counters;
-    FB(int t = 0; t < T; t++, counters.emplace_back([&] {
-         vector<u64> bits(kWords);
-         for (;;) {
-           u32 c = cursor.fetch_add(1, memory_order_relaxed);
-           IF(c >= countries, break);
-           bool any = false;
-           FB(int k = 0; k < T; k++, IB(!buckets[k][c].empty(), any = true; break))
-           IF(!any, continue);
-           memset(bits.data(), 0, kWords * sizeof(u64));
-           FB(int k = 0; k < T; k++, FB(u32 id : buckets[k][c], bits[id >> 6] |= 1ull << (id & 63)));
-           distinct[c] = popcount_words(bits.data());
-         }
-       }));
-    FB(auto& th : counters, th.join());
-  }
+  pool.clear();
+  FB(int t = 0; t < T; t++, pool.emplace_back([&, t] {
+       u32 lo = cut[t], hi = cut[t + 1];
+       FB(u32 c = lo; c < hi; ++c, u64* row = bits.data() + (size_t)c * kWords;
+          FB(int k = 0; k < T; ++k, FB(Chunk* ch = heads[(size_t)k * countries + c]; ch; ch = ch->next,
+                                       FB(u32 i = 0; i < ch->n; ++i, u32 id = ch->ids[i];
+                                          row[id >> 6] |= 1ull << (id & 63))));
+          distinct[c] = popcount_words(row));
+     }));
+  FB(auto& th : pool, th.join());
   vector<Agg> ag(countries);
   FB(int t = 0; t < T; t++, FB(size_t c = 0; c < countries; c++, const Agg& src = ags[t][c]; IF(src.count == 0, continue);
      Agg& dst = ag[c]; dst.count += src.count; dst.id_sum += src.id_sum; dst.name_bytes += src.name_bytes;
