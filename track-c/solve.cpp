@@ -1,7 +1,6 @@
-// Track C. One parse into per-thread runs, then one shared bitset.
-// IF/IB/FOR/FB/WH/WB/EL/EI/EIB/EB are the same control flow, packed so a
-// formatted line holds the header and the body. Behavior matches the 582-line
-// build: same threads, same allocator tuning, same hash.
+// Track C. One parallel parse, one shared name table, one country bitset.
+// Quoted fields are scanned 32 bytes at a time. Distinct names are marked
+// with a relaxed atomic or, so the per-record id lists are not stored.
 
 #include <algorithm>
 #include <atomic>
@@ -30,28 +29,26 @@ using u32 = uint32_t;
 using u64 = uint64_t;
 
 constexpr u8 kNoCountry = 0xff;
-constexpr u32 kSlots = 1u << 18, kMask = kSlots - 1;
-constexpr u32 kMaxNames = 1u << 17, kWords = kMaxNames >> 6;
+constexpr u32 kSlots = 1u << 18;
+constexpr u32 kMask = kSlots - 1;
+constexpr u32 kMaxNames = 1u << 17;
+constexpr u32 kWords = kMaxNames >> 6;
 constexpr u16 kBusy = 1;
+constexpr int kRing = 16;
 
-#define IF(c, ...) i##f(c) __VA_ARGS__
-#define IB(c, ...) i##f(c) <% __VA_ARGS__; %>
-#define FOR(h, ...) f##or(h) __VA_ARGS__
-#define FB(h, ...) f##or(h) <% __VA_ARGS__; %>
-#define WH(c, ...) w##hile(c) __VA_ARGS__
-#define WB(c, ...) w##hile(c) <% __VA_ARGS__; %>
-#define EL(...) e##lse __VA_ARGS__
-#define EI(c, ...) e##lse i##f(c) __VA_ARGS__
-#define EIB(c, ...) e##lse i##f(c) <% __VA_ARGS__; %>
-#define EB(...) e##lse <% __VA_ARGS__; %>
-
-[[noreturn]] void die(const char* m) { fprintf(stderr, "track-c: %s\n", m), exit(1); }
+[[noreturn]] void die(const char* m) {
+  fprintf(stderr, "track-c: %s\n", m);
+  exit(1);
+}
 
 int worker_count() {
-  IB(const char* e = getenv("SD_THREADS"), int n = atoi(e); IF(n >= 1 && n <= 64, return n));
+  if (const char* e = getenv("SD_THREADS")) {
+    int n = atoi(e);
+    if (n >= 1 && n <= 64) return n;
+  }
   unsigned hc = thread::hardware_concurrency();
-  IF(!hc, return 1);
-  IF(hc > 12, return 12);
+  if (!hc) return 1;
+  if (hc > 12) return 12;
   return (int)hc;
 }
 
@@ -65,22 +62,25 @@ struct Mapped {
   int fd = -1;
   size_t len = 0;
   const char* data = nullptr;
+
   explicit Mapped(const char* path) {
     fd = ::open(path, O_RDONLY);
-    IF(fd < 0, die("open input"));
+    if (fd < 0) die("open input");
     struct stat st {};
-    IF(fstat(fd, &st) != 0, die("fstat"));
+    if (fstat(fd, &st) != 0) die("fstat");
     len = (size_t)st.st_size;
-    IF(!len, return);
+    if (!len) return;
     void* p = mmap(nullptr, len, PROT_READ, MAP_PRIVATE, fd, 0);
-    IF(p == MAP_FAILED, die("mmap"));
+    if (p == MAP_FAILED) die("mmap");
     data = (const char*)p;
     madvise((char*)data, len, MADV_SEQUENTIAL);
   }
+
   ~Mapped() {
-    IF(data, munmap((char*)data, len));
-    IF(fd >= 0, close(fd));
+    if (data) munmap((char*)data, len);
+    if (fd >= 0) close(fd);
   }
+
   Mapped(const Mapped&) = delete;
   Mapped& operator=(const Mapped&) = delete;
 };
@@ -99,92 +99,141 @@ struct World {
   vector<char> codes;
   int code_slot[26 * 26 * 26];
   u32 unmatched = 0;
+
   World() { fill(begin(code_slot), end(code_slot), -1); }
+
   u32 country_of(char a, char b, char c) {
     int s = (a - 'A') * 676 + (b - 'A') * 26 + (c - 'A');
-    IF(code_slot[s] >= 0, return (u32)code_slot[s]);
+    if (code_slot[s] >= 0) return (u32)code_slot[s];
     u32 id = (u32)(codes.size() / 3);
-    IF(id >= kNoCountry, die("too many countries"));
+    if (id >= kNoCountry) die("too many countries");
     code_slot[s] = (int)id;
-    codes.push_back(a), codes.push_back(b), codes.push_back(c);
+    codes.push_back(a);
+    codes.push_back(b);
+    codes.push_back(c);
     return id;
   }
 };
 
 void load_regions(const Mapped& file, World& w) {
-  const char *p = file.data, *end = file.data + file.len;
-  WH(p < end && *p != '\n', p++);
-  IF(p < end, p++);
+  const char* p = file.data;
+  const char* end = file.data + file.len;
+  while (p < end && *p != '\n') ++p;
+  if (p < end) ++p;
   u32 max_id = 0;
-  struct Row { u32 id; char a, b, c; };
+  struct Row {
+    u32 id;
+    char a, b, c;
+  };
   vector<Row> rows;
   rows.reserve(file.len / 10);
-  WB(p < end, u32 id = 0; WB(p < end && *p >= '0' && *p <= '9', id = id * 10u + (u32)(*p - '0'); p++);
-     IF(p >= end || *p != ',', break); p++; char a = *p++, b = *p++, c = *p++;
-     IF(p < end && *p == '\n', p++); rows.push_back({id, a, b, c}); IF(id > max_id, max_id = id));
+  while (p < end) {
+    u32 id = 0;
+    while (p < end && *p >= '0' && *p <= '9') {
+      id = id * 10u + (u32)(*p - '0');
+      ++p;
+    }
+    if (p >= end || *p != ',') break;
+    ++p;
+    char a = *p++;
+    char b = *p++;
+    char c = *p++;
+    if (p < end && *p == '\n') ++p;
+    rows.push_back({id, a, b, c});
+    if (id > max_id) max_id = id;
+  }
   w.region_country.assign((size_t)max_id + 1, kNoCountry);
-  FB(const Row& r : rows, w.region_country[r.id] = (u8)w.country_of(r.a, r.b, r.c));
+  for (const Row& r : rows) w.region_country[r.id] = (u8)w.country_of(r.a, r.b, r.c);
   w.unmatched = (u32)(w.codes.size() / 3);
 }
 
 inline u32 country_index(const World& w, u32 region) {
-  IF(region >= w.region_country.size(), return w.unmatched);
+  if (region >= w.region_country.size()) return w.unmatched;
   u8 c = w.region_country[region];
   return c == kNoCountry ? w.unmatched : c;
 }
 
 inline u64 parse_digits(const char* s, const char* e) {
   u64 x = 0;
-  FB(; s < e; s++, x = x * 10 + (u64)(*s - '0'));
+  for (; s < e; ++s) x = x * 10 + (u64)(*s - '0');
   return x;
 }
 
-struct Slot { u32 len = 0, id = 0; char name[24]{}; const char* extra = nullptr; };
+// The hot names fit in the slot. A longer name is a one-off allocation.
+struct Slot {
+  u32 len;
+  u32 id;
+  char name[24];
+  const char* extra;
+};
 
 struct Names {
   atomic<u16> tags[kSlots];
   Slot slots[kSlots];
   atomic<u32> next{0};
-  Names() { FB(auto& t : tags, t.store(0, memory_order_relaxed)); }
+
+  Names() {
+    for (auto& t : tags) t.store(0, memory_order_relaxed);
+  }
+
   static u32 mix(const char* s, u32 n) {
     u64 h = n;
     u32 i = 0;
-    FB(; i + 8 <= n; i += 8, u64 v; memcpy(&v, s + i, 8); h = _mm_crc32_u64(h, v));
-    IB(i < n, u64 v = 0; memcpy(&v, s + i, n - i); h = _mm_crc32_u64(h, v));
+    for (; i + 8 <= n; i += 8) {
+      u64 v;
+      memcpy(&v, s + i, 8);
+      h = _mm_crc32_u64(h, v);
+    }
+    if (i < n) {
+      u64 v = 0;
+      memcpy(&v, s + i, n - i);
+      h = _mm_crc32_u64(h, v);
+    }
     return (u32)h;
   }
-  bool eq(const Slot& sl, const char* s, u32 n) const {
-    IF(sl.len != n, return false);
-    IF(n <= 24, return n == 0 || memcmp(sl.name, s, n) == 0);
+
+  static bool eq(const Slot& sl, const char* s, u32 n) {
+    if (sl.len != n) return false;
+    if (n <= 24) return n == 0 || memcmp(sl.name, s, n) == 0;
     return memcmp(sl.name, s, 24) == 0 && memcmp(sl.extra, s + 24, n - 24) == 0;
   }
+
   u32 intern(const char* s, u32 n, u32 h) {
     u16 tag = (u16)(h >> 16);
-    IF(tag < 2, tag = (u16)(tag + 2));
+    if (tag < 2) tag = (u16)(tag + 2);
     u32 i = h & kMask;
     for (;;) {
       u16 t = tags[i].load(memory_order_acquire);
-      IB(t == tag, IF(eq(slots[i], s, n), return slots[i].id))
-      EIB(t == 0, u16 exp = 0;
-          IB(tags[i].compare_exchange_weak(exp, kBusy, memory_order_acq_rel),
-             u32 id = next.fetch_add(1, memory_order_relaxed);
-             IF(id >= kMaxNames, die("name table full"));
-             Slot& sl = slots[i];
-             sl.len = n;
-             sl.id = id;
-             u32 head = n < 24 ? n : 24;
-             IF(head, memcpy(sl.name, s, head));
-             IB(n > 24, char* buf = new char[n - 24]; memcpy(buf, s + 24, n - 24); sl.extra = buf)
-             tags[i].store(tag, memory_order_release);
-             return id)
-          continue)
-      EIB(t == kBusy, _mm_pause(); continue)
+      if (t == tag) {
+        if (eq(slots[i], s, n)) return slots[i].id;
+      } else if (t == 0) {
+        u16 exp = 0;
+        if (tags[i].compare_exchange_weak(exp, kBusy, memory_order_acq_rel)) {
+          u32 id = next.fetch_add(1, memory_order_relaxed);
+          if (id >= kMaxNames) die("name table full");
+          Slot& sl = slots[i];
+          sl.len = n;
+          sl.id = id;
+          u32 head_n = n < 24 ? n : 24;
+          if (head_n) memcpy(sl.name, s, head_n);
+          if (n > 24) {
+            char* buf = new char[n - 24];
+            memcpy(buf, s + 24, n - 24);
+            sl.extra = buf;
+          }
+          tags[i].store(tag, memory_order_release);
+          return id;
+        }
+        continue;
+      } else if (t == kBusy) {
+        _mm_pause();
+        continue;
+      }
       i = (i + 1) & kMask;
     }
   }
 };
 
-struct Pend { u32 country; const char* s; u32 n, h; };
 struct View {
   const char* name = nullptr;
   u32 name_raw = 0, name_un = 0, note_un = 0, region = 0;
@@ -193,56 +242,103 @@ struct View {
   const char* next = nullptr;
 };
 
-inline const char* close_quote(const char* p, const char* end, int& esc) {
-  esc = 0;
-  WB(p < end, const char* q = (const char*)memchr(p, '"', (size_t)(end - p));
-     IF(!q, return end);
-     IB(q + 1 < end && q[1] == '"', esc++; p = q + 2; continue)
-     return q);
-  return end;
+// Next quote or newline. One 32-byte compare covers a typical name.
+__attribute__((always_inline)) inline const char* scan_to_quote(const char* p, const char* end) {
+  const __m256i quotes = _mm256_set1_epi8('"');
+  const __m256i breaks = _mm256_set1_epi8('\n');
+  while (p + 32 <= end) {
+    __m256i v = _mm256_loadu_si256((const __m256i*)p);
+    int q = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, quotes));
+    int n = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, breaks));
+    int m = q | n;
+    if (m) return p + __builtin_ctz(m);
+    p += 32;
+  }
+  while (p < end && *p != '"' && *p != '\n') ++p;
+  return p;
+}
+
+// Field is either "raw" (with "" escapes) or bare text up to comma/newline.
+__attribute__((always_inline)) inline const char* read_field(const char* p, const char* end,
+                                                            const char*& raw, u32& raw_n, u32& un_n) {
+  if (p < end && *p == '"') {
+    ++p;
+    raw = p;
+    int esc = 0;
+    while (p < end) {
+      if (*p != '"' && *p != '\n') p = scan_to_quote(p, end);
+      if (p >= end) break;
+      if (*p == '\n') {
+        ++p;
+        continue;
+      }
+      if (p + 1 < end && p[1] == '"') {
+        ++esc;
+        p += 2;
+        continue;
+      }
+      raw_n = (u32)(p - raw);
+      un_n = raw_n - (u32)esc;
+      return p + 1;
+    }
+    raw_n = (u32)(end - raw);
+    un_n = raw_n - (u32)esc;
+    return end;
+  }
+  raw = p;
+  while (p < end && *p != ',' && *p != '\n') ++p;
+  raw_n = un_n = (u32)(p - raw);
+  return p;
 }
 
 inline int64_t parse_money(const char* s, const char* e) {
   int sign = 1;
-  IB(s < e && *s == '-', sign = -1; s++)
+  if (s < e && *s == '-') {
+    sign = -1;
+    ++s;
+  }
   const char* dot = s;
-  WH(dot < e && *dot != '.', dot++);
+  while (dot < e && *dot != '.') ++dot;
   u64 whole = parse_digits(s, dot);
   int frac = 0;
-  IF(dot + 2 < e, frac = (dot[1] - '0') * 10 + (dot[2] - '0'));
+  if (dot + 2 < e) frac = (dot[1] - '0') * 10 + (dot[2] - '0');
   return sign * ((int64_t)whole * 100 + frac);
 }
 
-View parse_at(const char* p, const char* end) {
+__attribute__((always_inline)) inline View parse_record(const char* p, const char* end) {
   View v;
-  IF(is_bom(p, end), p += 3);
+  if (is_bom(p, end)) p += 3;
   const char* id_b = p;
-  WH(p < end && *p != ',', p++);
+  while (p < end && *p != ',') ++p;
   v.id = parse_digits(id_b, p);
-  IF(p < end, p++);
-  IB(p < end && *p == '"', const char* ns = ++p; int esc = 0; const char* q = close_quote(p, end, esc);
-     v.name = ns; v.name_raw = (u32)(q - ns); v.name_un = v.name_raw - (u32)esc; p = q < end ? q + 1 : end)
-  EB(v.name = p; WH(p < end && *p != ',', p++); v.name_raw = v.name_un = (u32)(p - v.name))
-  IF(p < end && *p == ',', p++);
-  IB(p < end && *p == '"', const char* ns = ++p; int esc = 0; const char* q = close_quote(p, end, esc);
-     v.note_un = (u32)(q - ns) - (u32)esc; p = q < end ? q + 1 : end)
-  EB(const char* ns = p; WH(p < end && *p != ',', p++); v.note_un = (u32)(p - ns))
-  IF(p < end && *p == ',', p++);
+  if (p < end) ++p;
+  u32 note_raw = 0;
+  const char* note = nullptr;
+  p = read_field(p, end, v.name, v.name_raw, v.name_un);
+  if (p < end && *p == ',') ++p;
+  p = read_field(p, end, note, note_raw, v.note_un);
+  if (p < end && *p == ',') ++p;
   const char* rb = p;
-  WH(p < end && *p != ',', p++);
+  while (p < end && *p != ',') ++p;
   v.region = (u32)parse_digits(rb, p);
-  IF(p < end && *p == ',', p++);
+  if (p < end && *p == ',') ++p;
   const char* ab = p;
-  WH(p < end && *p != '\n', p++);
+  while (p < end && *p != '\n') ++p;
   const char* ae = p;
-  IF(ae > ab && ae[-1] == '\r', ae--);
+  if (ae > ab && ae[-1] == '\r') --ae;
   v.cents = parse_money(ab, ae);
   v.next = p + (p < end);
   return v;
 }
 
 const char* find_crlf(const char* p, const char* end) {
-  WB(p + 1 < end, IF(p[0] == '\r' && p[1] == '\n', return p + 2); p++);
+  while (p + 1 < end) {
+    const void* hit = memchr(p, '\r', (size_t)(end - p));
+    if (!hit) return end;
+    const char* c = (const char*)hit;
+    if (c + 1 < end && c[1] == '\n') return c + 2;
+    p = c + 1;
+  }
   return end;
 }
 
@@ -255,7 +351,10 @@ void append_u64(vector<char>& o, u64 x) {
 }
 
 void append_money(vector<char>& o, int64_t cents) {
-  IB(cents < 0, o.push_back('-'); cents = -cents)
+  if (cents < 0) {
+    o.push_back('-');
+    cents = -cents;
+  }
   append_u64(o, (u64)(cents / 100));
   o.push_back('.');
   int f = (int)(cents % 100);
@@ -264,7 +363,12 @@ void append_money(vector<char>& o, int64_t cents) {
 }
 
 void write_all(int fd, const char* p, size_t n) {
-  WB(n, ssize_t k = ::write(fd, p, n); IF(k < 0, die("write")); p += k; n -= (size_t)k);
+  while (n) {
+    ssize_t k = ::write(fd, p, n);
+    if (k < 0) die("write");
+    p += k;
+    n -= (size_t)k;
+  }
 }
 
 const char* env_or(const char* key, const char* fb) {
@@ -272,30 +376,21 @@ const char* env_or(const char* key, const char* fb) {
   return v && *v ? v : fb;
 }
 
-u32 popcount_words(const u64* b) {
+u32 popcount_row(const u64* b) {
   u32 n = 0;
-  FB(u32 i = 0; i < kWords; i++, n += (u32)__builtin_popcountll(b[i]));
+  for (u32 i = 0; i < kWords; ++i) n += (u32)__builtin_popcountll(b[i]);
   return n;
 }
 
-// Fixed-size runs of name ids. Threads append only to their own runs.
-struct Chunk {
-  Chunk* next = nullptr;
-  u32 n = 0;
-  u32 ids[32]{};
-};
+void mark_name(u64* bits, u32 country, u32 id) {
+  u64* word = bits + (size_t)country * kWords + (id >> 6);
+  __atomic_fetch_or(word, 1ull << (id & 63), __ATOMIC_RELAXED);
+}
 
-struct Blocks {
-  struct Node {
-    Node* next = nullptr;
-    u32 used = 0;
-    Chunk chunks[128]{};
-  };
-  Node* head = nullptr;
-  Chunk* take() {
-    IB(!head || head->used == 128, Node* n = new Node; n->next = head; head = n);
-    return &head->chunks[head->used++];
-  }
+struct Pend {
+  u32 country;
+  const char* s;
+  u32 n, h;
 };
 
 }  // namespace
@@ -312,104 +407,125 @@ int main() {
   const char* data = records.data;
   const char* end = records.data + records.len;
   const char* p = data;
-  IF(is_bom(p, end), p += 3);
-  WH(p < end && *p != '\n', p++);
-  IF(p < end, p++);
+  if (is_bom(p, end)) p += 3;
+  while (p < end && *p != '\n') ++p;
+  if (p < end) ++p;
   const char* first = p;
   int T = worker_count();
   vector<const char*> starts((size_t)T + 1);
   starts[0] = first;
   starts[T] = end;
-  FB(int t = 1; t < T; t++, const char* cut = data + records.len * (size_t)t / (size_t)T;
-     IF(cut < first, cut = first); starts[t] = find_crlf(cut, end));
-  FB(int t = 1; t <= T; t++, IF(starts[t] < starts[t - 1], starts[t] = starts[t - 1]));
+  for (int t = 1; t < T; ++t) {
+    const char* cut = data + records.len * (size_t)t / (size_t)T;
+    if (cut < first) cut = first;
+    starts[t] = find_crlf(cut, end);
+  }
+  for (int t = 1; t <= T; ++t) {
+    if (starts[t] < starts[t - 1]) starts[t] = starts[t - 1];
+  }
+
   vector<vector<Agg>> ags((size_t)T, vector<Agg>(countries));
-  vector<Chunk*> heads((size_t)T * countries, nullptr);
-  vector<Blocks> blocks((size_t)T);
   Names* names = new Names;
+  vector<u64> bits(countries * kWords);
   vector<thread> pool;
-  // Each thread scatters name ids into its own per-country runs.
-  FB(int t = 0; t < T; t++, pool.emplace_back([&, t] {
-       vector<Agg>& ag = ags[t];
-       Blocks& arena = blocks[t];
-       Pend ring[16];
-       int hd = 0, filled = 0;
-       auto push_id = [&](u32 cid, u32 id) {
-         size_t ix = (size_t)t * countries + cid;
-         Chunk* h = heads[ix];
-         IB(!h || h->n == 32, Chunk* c = arena.take(); c->next = h; c->n = 0; heads[ix] = h = c);
-         h->ids[h->n++] = id;
-       };
-       auto drain_one = [&] {
-         Pend e = ring[hd];
-         hd = (hd + 1) & 15;
-         --filled;
-         push_id(e.country, names->intern(e.s, e.n, e.h));
-       };
-       const char *q = starts[t], *limit = starts[t + 1];
-       WB(q < limit && q < end, _mm_prefetch(q + 256, _MM_HINT_T0); View v = parse_at(q, end);
-          u32 cid = country_index(world, v.region); Agg& a = ag[cid];
-          a.count++; a.id_sum += v.id; a.amount_sum += v.cents;
-          IF(v.cents < a.amin, a.amin = v.cents);
-          IF(v.cents > a.amax, a.amax = v.cents);
-          a.name_bytes += v.name_un; a.note_bytes += v.note_un; u32 hsh = Names::mix(v.name, v.name_raw);
-          _mm_prefetch((const char*)&names->tags[hsh & kMask], _MM_HINT_T0);
-          _mm_prefetch((const char*)&names->slots[hsh & kMask], _MM_HINT_T0);
-          IF(filled == 16, drain_one());
-          ring[(hd + filled) & 15] = Pend{cid, v.name, v.name_raw, hsh}; ++filled; q = v.next);
-       WB(filled, drain_one());
-     }));
-  FB(auto& th : pool, th.join());
-  delete names;
-  // Own a contiguous run of countries with roughly equal record counts.
-  vector<u64> load(countries);
-  FB(int t = 0; t < T; t++, FB(size_t c = 0; c < countries; c++, load[c] += ags[t][c].count));
-  u64 total = 0;
-  FB(u64 n : load, total += n);
-  vector<u32> cut((size_t)T + 1);
-  cut[T] = (u32)countries;
-  u64 run = 0;
-  int part = 0;
-  FB(u32 c = 0; c < countries && part + 1 < T; ++c, run += load[c];
-     WB(part + 1 < T && run >= total * (u64)(part + 1) / (u64)T, cut[++part] = c + 1));
-  WB(part + 1 < T, cut[++part] = (u32)countries);
-  // One bitset. Only the owner of a country writes that row.
-  vector<u64> bits((size_t)countries * kWords);
+  for (int t = 0; t < T; ++t) {
+    pool.emplace_back([&, t] {
+      vector<Agg>& ag = ags[t];
+      Pend ring[kRing];
+      int head = 0, filled = 0;
+      auto drain_one = [&] {
+        Pend e = ring[head];
+        head = (head + 1) & (kRing - 1);
+        --filled;
+        u32 id = names->intern(e.s, e.n, e.h);
+        mark_name(bits.data(), e.country, id);
+      };
+      const char* q = starts[t];
+      const char* limit = starts[t + 1];
+      while (q < limit && q < end) {
+        _mm_prefetch(q + 256, _MM_HINT_T0);
+        View v = parse_record(q, end);
+        u32 cid = country_index(world, v.region);
+        Agg& a = ag[cid];
+        a.count++;
+        a.id_sum += v.id;
+        a.amount_sum += v.cents;
+        if (v.cents < a.amin) a.amin = v.cents;
+        if (v.cents > a.amax) a.amax = v.cents;
+        a.name_bytes += v.name_un;
+        a.note_bytes += v.note_un;
+        u32 h = Names::mix(v.name, v.name_raw);
+        _mm_prefetch(names->tags + (h & kMask), _MM_HINT_T0);
+        _mm_prefetch(names->slots + (h & kMask), _MM_HINT_T0);
+        if (filled == kRing) drain_one();
+        ring[(head + filled) & (kRing - 1)] = Pend{cid, v.name, v.name_raw, h};
+        ++filled;
+        q = v.next;
+      }
+      while (filled) drain_one();
+    });
+  }
+  for (auto& th : pool) th.join();
+
   vector<u32> distinct(countries);
-  pool.clear();
-  FB(int t = 0; t < T; t++, pool.emplace_back([&, t] {
-       u32 lo = cut[t], hi = cut[t + 1];
-       FB(u32 c = lo; c < hi; ++c, u64* row = bits.data() + (size_t)c * kWords;
-          FB(int k = 0; k < T; ++k, FB(Chunk* ch = heads[(size_t)k * countries + c]; ch; ch = ch->next,
-                                       FB(u32 i = 0; i < ch->n; ++i, u32 id = ch->ids[i];
-                                          row[id >> 6] |= 1ull << (id & 63))));
-          distinct[c] = popcount_words(row));
-     }));
-  FB(auto& th : pool, th.join());
+  for (size_t c = 0; c < countries; ++c) distinct[c] = popcount_row(bits.data() + c * kWords);
+
   vector<Agg> ag(countries);
-  FB(int t = 0; t < T; t++, FB(size_t c = 0; c < countries; c++, const Agg& src = ags[t][c]; IF(src.count == 0, continue);
-     Agg& dst = ag[c]; dst.count += src.count; dst.id_sum += src.id_sum; dst.name_bytes += src.name_bytes;
-     dst.note_bytes += src.note_bytes; dst.amount_sum += src.amount_sum;
-     IF(src.amin < dst.amin, dst.amin = src.amin); IF(src.amax > dst.amax, dst.amax = src.amax)));
+  for (int t = 0; t < T; ++t) {
+    for (size_t c = 0; c < countries; ++c) {
+      const Agg& src = ags[t][c];
+      if (src.count == 0) continue;
+      Agg& dst = ag[c];
+      dst.count += src.count;
+      dst.id_sum += src.id_sum;
+      dst.name_bytes += src.name_bytes;
+      dst.note_bytes += src.note_bytes;
+      dst.amount_sum += src.amount_sum;
+      if (src.amin < dst.amin) dst.amin = src.amin;
+      if (src.amax > dst.amax) dst.amax = src.amax;
+    }
+  }
+
   vector<u32> order;
   order.reserve(world.unmatched);
-  FB(u32 c = 0; c < world.unmatched; c++, IF(ag[c].count, order.push_back(c)));
+  for (u32 c = 0; c < world.unmatched; ++c) {
+    if (ag[c].count) order.push_back(c);
+  }
   sort(order.begin(), order.end(), [&](u32 a, u32 b) {
     return memcmp(world.codes.data() + a * 3, world.codes.data() + b * 3, 3) < 0;
   });
-  IF(ag[world.unmatched].count, order.push_back(world.unmatched));
+  if (ag[world.unmatched].count) order.push_back(world.unmatched);
+
   vector<char> out;
   out.reserve(order.size() * 80 + 64);
-  FB(u32 c : order, const Agg& a = ag[c];
-     IF(c == world.unmatched, out.insert(out.end(), "_UNMATCHED", "_UNMATCHED" + 10));
-     EB(out.insert(out.end(), world.codes.data() + c * 3, world.codes.data() + c * 3 + 3));
-     out.push_back(' '); append_u64(out, a.count); out.push_back(' '); append_u64(out, a.id_sum);
-     out.push_back(' '); append_money(out, a.amount_sum); out.push_back(' '); append_money(out, a.amin);
-     out.push_back(' '); append_money(out, a.amax); out.push_back(' '); append_u64(out, distinct[c]);
-     out.push_back(' '); append_u64(out, a.name_bytes); out.push_back(' '); append_u64(out, a.note_bytes);
-     out.push_back('\n'));
+  for (u32 c : order) {
+    const Agg& a = ag[c];
+    if (c == world.unmatched) {
+      out.insert(out.end(), "_UNMATCHED", "_UNMATCHED" + 10);
+    } else {
+      out.insert(out.end(), world.codes.data() + c * 3, world.codes.data() + c * 3 + 3);
+    }
+    out.push_back(' ');
+    append_u64(out, a.count);
+    out.push_back(' ');
+    append_u64(out, a.id_sum);
+    out.push_back(' ');
+    append_money(out, a.amount_sum);
+    out.push_back(' ');
+    append_money(out, a.amin);
+    out.push_back(' ');
+    append_money(out, a.amax);
+    out.push_back(' ');
+    append_u64(out, distinct[c]);
+    out.push_back(' ');
+    append_u64(out, a.name_bytes);
+    out.push_back(' ');
+    append_u64(out, a.note_bytes);
+    out.push_back('\n');
+  }
+
   int fd = ::open(outp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-  IF(fd < 0, die("open output"));
+  if (fd < 0) die("open output");
   write_all(fd, out.data(), out.size());
   close(fd);
   return 0;
