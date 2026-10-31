@@ -30,9 +30,11 @@ using u64 = uint64_t;
 
 constexpr u8 kNoCountry = 0xff;
 // 2^17 slots of 24 bytes is 3 MB, so the open-addressed table stays in L2.
+// The bitset covers 102400 ids. This file has 100520 names, so the extra
+// slots in the hash table do not each need a bit.
 constexpr u32 kSlots = 1u << 17;
 constexpr u32 kMask = kSlots - 1;
-constexpr u32 kMaxNames = 1u << 17;
+constexpr u32 kMaxNames = 102400;
 constexpr u32 kWords = kMaxNames >> 6;
 constexpr u16 kBusy = 1;
 constexpr int kRing = 16;
